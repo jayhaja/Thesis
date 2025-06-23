@@ -1,0 +1,1911 @@
+---
+title: "donor_daily_traffic"
+output: html_document
+date: "2025-05-10"
+---
+#======
+#Functions
+
+
+```{r}
+# 3. Read and bind them row-wise
+library(readr)   # read_csv()
+library(purrr)   # map_dfr()
+library(dplyr)
+library(readxl)
+library(vroom)
+
+#──────────────────────────────────────────────────────────────────────────────
+# 0. 한글 폰트 · 기본 테마  ---------------------------------------------------
+#──────────────────────────────────────────────────────────────────────────────
+library(showtext)
+library(ggplot2)
+
+font_add(family = "main", regular = "/System/Library/Fonts/AppleGothic.ttf")
+showtext_auto()
+theme_set(theme_minimal(base_family = "main"))
+
+```
+#==================
+#Import
+
+
+```{r}
+library(readr)
+library(purrr)
+library(dplyr)
+
+# 1️⃣ CSV 폴더 경로
+data_dir <- "/Users/maeg/Downloads/Downloads"
+
+# 2️⃣ 파일 목록 불러오기
+csv_files <- list.files(data_dir, pattern = "\\.csv$", full.names = TRUE)
+
+# 3️⃣ 안전한 읽기 함수: UTF-8 → 실패 시 CP949
+safe_read_csv <- function(file_path) {
+  tryCatch({
+    read_csv(
+      file = file_path,
+      locale = locale(encoding = "UTF-8"),
+      col_types = cols(.default = "c"),
+      progress = FALSE
+    )
+  }, error = function(e1) {
+    message("⚠️ UTF-8 실패: ", basename(file_path), " → CP949 재시도")
+    tryCatch({
+      read_csv(
+        file = file_path,
+        locale = locale(encoding = "CP949"),
+        col_types = cols(.default = "c"),
+        progress = FALSE
+      )
+    }, error = function(e2) {
+      message("❌ CP949도 실패: ", basename(file_path))
+      return(NULL)
+    })
+  })
+}
+
+# 4️⃣ 파일을 25개씩 나누기
+batch_size <- 25
+batches <- split(csv_files, ceiling(seq_along(csv_files) / batch_size))
+
+# 5️⃣ 결과 저장 리스트
+all_data <- vector("list", length(batches))
+
+# 6️⃣ 배치별 반복 처리
+for (i in seq_along(batches)) {
+  message("🔄 Reading batch ", i, " of ", length(batches))
+
+  batch_data <- map_dfr(batches[[i]], safe_read_csv)
+
+  message("✔ Batch ", i, " 완료: ", nrow(batch_data), " rows")
+
+  all_data[[i]] <- batch_data
+  rm(batch_data)
+  gc()
+}
+
+# 7️⃣ 전체 병합
+donor_all_merged <- bind_rows(all_data)
+
+#병합된 파일에서 필요 없는 열, 버스도로 빼기
+
+library(dplyr)
+
+write.csv(donor_all_merged, "/Users/maeg/Downloads/Thesis_Materials/daily_all_neat/donor_all_merged.csv", row.names = FALSE, fileEncoding = "CP949")
+
+donor_daily_raw <- donor_all_merged %>%
+  # 1) COCT_CD != "2"인 행만 남기기
+  filter(COCT_CD != "2") %>%
+  # 2) 불필요한 열 제거
+  dplyr::select(
+    -PASNG_RUNTM_MINS,
+    -PASNG_TM_CHANGE_CFFCN,
+    -MAX_PASNG_TM_MINS,
+    -MEDIAN_PASNG_TM_MINS,
+    -MINM_PASNG_TM_MINS,
+    -F15T85_PASNG_RUNTM_QNTL,
+    -LAST_CHANGE_DAYHMINSEC,
+    -NMLT_CSCNT,
+    -REVISN_CSCNT,
+    -PSTM_STDV,
+    -END_ND_NM,
+    -END_ND_GPS_LAT,
+    -END_ND_GPS_LONG
+  )
+
+donor_daily_raw <- donor_daily_raw %>%
+  dplyr::select(
+    -COCT_CD
+  )
+
+#write.csv(donor_daily_raw, "daily_raw_donors.csv", fileEncoding = "UTF-8")
+
+
+summary(donor_daily_raw)
+summary(is.na(donor_daily_raw))
+print(donor_daily_raw)
+```
+
+
+```{r}
+library(readxl)
+library(dplyr)
+
+
+# 1️⃣ 콘존 기본정보 파일 불러오기 (CP949 → UTF-8 자동 변환)
+donor_node_route_map <- read_csv(
+  "/Users/maeg/Downloads/Thesis_Materials/ETC_conzone_20250426", 
+  locale    = locale(encoding = "CP949"),          
+  col_types = cols(.default = col_character())     
+) %>%
+  rename(
+    CZN_CD    = `콘존ID`,
+    length    = `콘존길이`,
+    direction = `기점종점방향구분코드`,
+    lanes     = `차로수`,
+    routeNum  = `노선번호`,
+    limit_kmh = `제한속도`,
+    routeNM   = `콘존명`,
+    bus       = `버스전용차로유무`,
+    rank      = `도로등급구분코드`,
+    order     = `노선구성순번`,
+    start_ID  = `시작노드ID`,
+    end_ID    = `종료노드ID`
+  ) %>%
+  mutate(
+    CZN_CD = as.character(CZN_CD)
+  ) %>%
+  dplyr::select(-order, -start_ID, -end_ID)%>%
+  print()
+
+```
+
+```{r}
+
+# 콘존과 노선번호 매핑 (도로공사 제공)
+donor_org_roadName_map <- read_csv(
+  "/Users/maeg/Downloads/Thesis_Materials/ETC_routes_20250505",
+  locale    = locale(encoding = "CP949"),
+  col_types = cols(.default = "c")
+) %>% 
+  rename(
+    routeNum  = `노선번호`,
+    ROAD_NAME = `도로명`
+  )  %>%
+  select(routeNum, ROAD_NAME) %>%
+  print()
+
+```
+
+
+```{r}
+
+info_map <- donor_node_route_map %>%
+  left_join(donor_org_roadName_map, by = "routeNum") %>%
+  print()
+
+
+length(unique(info_map$CZN_CD)) #czn_cd 1667
+```
+## 도로 전체 길이 계산:
+# row_data_length_by_routeNum
+
+```{r}
+
+### 각 도로 전체 길이
+
+library(dplyr)
+
+row_data_length_by_routeNum <- info_map %>%
+  filter(direction == "E") %>%                          # 상행선만
+  mutate(length = as.numeric(length)) %>%               # length를 숫자로 변환
+  group_by(routeNum) %>%
+  summarise(total_length_km = (sum(length, na.rm = TRUE)/1000)) %>%
+  arrange(desc(total_length_km)) %>%                       # 길이순 정렬
+  left_join(donor_org_roadName_map, by = "routeNum") %>%
+print(row_data_length_by_routeNum)
+
+
+```
+
+#=
+# info_map 사용하여 콘존에 linkid 할당
+#=
+
+```{r}
+library(readxl)
+library(dplyr)
+
+
+donor_node_conzone_linkid <- read_xls(
+  "/Users/maeg/Downloads/Thesis_Materials/20250414_nodelink.xls",
+  col_types = "text"  # 전 열 문자형
+) %>% 
+  rename(
+    CZN_CD  = `콘존ID`,
+    routeNM = `콘존명`,
+    LINK_ID = `표준링크ID`
+  ) %>%
+  print()
+
+
+
+
+```
+
+
+#===
+#info_map_with_linkid를 정보맵으로 쓰기
+
+```{r}
+
+info_map_with_linkid <- info_map %>%
+  left_join(donor_node_conzone_linkid, by = c("CZN_CD", "routeNM")) %>%
+  print()
+
+
+#length(unique(info_map_with_linkid$CZN_CD)) #czn_cd 1667
+
+#Which is na?
+
+missing_link_or_czn <- info_map_with_linkid %>%
+  filter(is.na(LINK_ID) | is.na(CZN_CD))
+
+print(missing_link_or_czn)
+
+#what's the median traffic values of na dataset?
+
+
+# 1. NA가 있는 CZN_CD 목록 추출
+missing_czn_list <- missing_link_or_czn %>%
+  filter(!is.na(CZN_CD)) %>%
+  pull(CZN_CD) %>%
+  unique()
+
+# 2. donor_traffic_raw에서 해당 CZN_CD만 필터링해서 median 계산
+median_traffic_by_czn <- donor_daily_raw %>%
+  filter(CZN_CD %in% missing_czn_list) %>%
+  mutate(TRFFCVLM = as.numeric(TRFFCVLM)) %>%
+  group_by(CZN_CD) %>%
+  summarise(median_traffic = median(TRFFCVLM, na.rm = TRUE)) %>%
+  arrange(desc(median_traffic))
+
+
+# 3. 결과 보기
+print(median_traffic_by_czn) ####Those Nas can be ignored when it comes to traffic volume.
+
+### 지역 정보 확인차 chatgpt 제공용. 
+missing_tbl <- missing_link_or_czn %>% dplyr::select(CZN_CD, routeNM, direction, ROAD_NAME)%>% dplyr::select(-direction)
+
+
+
+```
+
+
+
+```{r}
+#missing_link_or_czn 에서 지역 없는 곳 임의로 할당하기
+library(tibble)   # tribble()
+
+czn_region_map <- tribble(
+  ~CZN_CD,        ~region_missing,
+  # ── 상행 (CZE) ─────────────────────────
+  "0010CZE005",   "busan",
+  "0010CZE165",   "gyeongbuk",
+  "0010CZE205",   "gyeongbuk",
+  "0010CZE405",   "gyeonggi",
+  "0141CZE170",   "gyeongnam",
+  "0141CZE180",   "gyeongnam",
+  "0141CZE190",   "gyeongnam",
+  "0150CZE005",   "jeonnam",
+  "0150CZE055",   "jeonnam",
+  "0150CZE265",   "gyeonggi",
+  "0150CZE390",   "seoul",
+  "0153CZE035",   "gyeonggi",
+  "0170CZE075",   "gyeonggi",
+  "0175CZE010",   "chungnam",
+  "0175CZE020",   "chungnam",
+  "0175CZE030",   "chungnam",
+  "0175CZE040",   "chungnam",
+  "0175CZE050",   "chungnam",
+  "0175CZE060",   "chungnam",
+  "0175CZE070",   "chungnam",
+  "0175CZE080",   "gyeonggi",
+  "0175CZE090",   "gyeonggi",
+  "0251CZE185",   "jeonnam",
+  "0270CZE130",   "jeonbuk",
+  "0290CZE100",   "gyeonggi",
+  "0290CZE110",   "seoul",
+  "0290CZE120",   "gyeonggi",
+  "0290CZE130",   "seoul",
+  "0290CZE140",   "gyeonggi",
+  "0290CZE150",   "gyeonggi",
+  "0290CZE160",   "gyeonggi",
+  "0290CZE170",   "gyeonggi",
+  "0290CZE180",   "gyeonggi",
+  "0290CZE190",   "gyeonggi",
+  "0290CZE200",   "gyeonggi",
+  "0300CZE175",   "gyeongbuk",
+  "0301CZE035",   "chungnam",
+  "0321CZE010",   "chungnam",
+  "0321CZE020",   "chungnam",
+  "0321CZE030",   "chungnam",
+  "0352CZE285",   "chungbuk",
+  "0400CZE075",   "gyeonggi",
+  "0450CZE055",   "gyeongnam",
+  "0500CZE005",   "incheon",
+  "0500CZE145",   "gyeonggi",
+  "0550CZE145",   "gyeongbuk",
+  "0550CZE350",   "gangwon",
+  "0600CZE065",   "gyeonggi",
+  "1000CZE055",   "gyeonggi",
+  "1040CZE015",   "gyeongnam",
+  "1200CZE090",   "seoul",
+  "1510CZE025",   "chungnam",
+  "1730CZE010",   "gyeonggi",
+  "1730CZE020",   "gyeonggi",
+  "4002CZE030",   "gyeonggi",
+  "4002CZE040",   "gyeonggi",
+  "4002CZE050",   "gyeonggi",
+  "4005CZE010",   "gyeonggi",
+  "4005CZE020",   "gyeonggi",
+  "4005CZE030",   "gyeonggi",
+  "4006CZE010",   "gyeonggi",
+  "4007CZE010",   "gyeonggi",
+  "4007CZE020",   "gyeonggi",
+  "4007CZE030",   "gyeonggi",
+  "4007CZE040",   "gyeonggi",
+  "4007CZE050",   "gyeonggi",
+  "4007CZE060",   "gyeonggi",
+  # ── 하행 (CZS) ─────────────────────────
+  "0010CZS005",   "busan",
+  "0010CZS165",   "gyeongbuk",
+  "0010CZS205",   "gyeongbuk",
+  "0010CZS405",   "gyeonggi",
+  "0141CZS170",   "gyeongnam",
+  "0141CZS180",   "gyeongnam",
+  "0141CZS190",   "gyeongnam",
+  "0150CZS005",   "jeonnam",
+  "0150CZS055",   "jeonnam",
+  "0150CZS265",   "gyeonggi",
+  "0150CZS390",   "seoul",
+  "0153CZS035",   "gyeonggi",
+  "0170CZS075",   "gyeonggi",
+  "0175CZS010",   "chungnam",
+  "0175CZS020",   "chungnam",
+  "0175CZS030",   "chungnam",
+  "0175CZS040",   "chungnam",
+  "0175CZS050",   "chungnam",
+  "0175CZS060",   "chungnam",
+  "0175CZS070",   "chungnam",
+  "0175CZS080",   "gyeonggi",
+  "0175CZS090",   "gyeonggi",
+  "0200CZS050",   "daegu",
+  "0251CZS185",   "jeonnam",
+  "0270CZS130",   "jeonbuk",
+  "0290CZS100",   "gyeonggi",
+  "0290CZS110",   "seoul",
+  "0290CZS120",   "gyeonggi",
+  "0290CZS130",   "seoul",
+  "0290CZS140",   "gyeonggi",
+  "0290CZS150",   "gyeonggi",
+  "0290CZS160",   "gyeonggi",
+  "0290CZS170",   "gyeonggi",
+  "0290CZS180",   "gyeonggi",
+  "0290CZS190",   "gyeonggi",
+  "0290CZS200",   "gyeonggi",
+  "0301CZS035",   "chungnam",
+  "0321CZS010",   "chungnam",
+  "0321CZS020",   "chungnam",
+  "0321CZS030",   "chungnam",
+  "0352CZS285",   "chungbuk",
+  "0400CZS075",   "gyeonggi",
+  "0450CZS055",   "gyeongnam",
+  "0500CZS005",   "incheon",
+  "0500CZS145",   "gyeonggi",
+  "0550CZS145",   "gyeongbuk",
+  "0550CZS350",   "gangwon",
+  "0552CZS085",   "daegu",
+  "0600CZS065",   "gyeonggi",
+  "1000CZS055",   "gyeonggi",
+  "1040CZS015",   "gyeongnam",
+  "1200CZS090",   "seoul",
+  "1510CZS025",   "chungnam",
+  "1730CZS010",   "gyeonggi",
+  "1730CZS020",   "gyeonggi",
+  "4002CZS030",   "gyeonggi",
+  "4002CZS040",   "gyeonggi",
+  "4002CZS050",   "gyeonggi",
+  "4005CZS010",   "gyeonggi",
+  "4005CZS020",   "gyeonggi",
+  "4005CZS030",   "gyeonggi",
+  "4006CZS010",   "gyeonggi",
+  "4007CZS010",   "gyeonggi",
+  "4007CZS020",   "gyeonggi",
+  "4007CZS030",   "gyeonggi",
+  "4007CZS040",   "gyeonggi",
+  "4007CZS050",   "gyeonggi",
+  "4007CZS060",   "gyeonggi",
+  "0200CZE050", "daegu"
+)
+
+
+# 확인
+print(czn_region_map, n = Inf)
+
+
+missing_link_or_czn_with_region <- missing_link_or_czn %>%
+  left_join(czn_region_map, by = "CZN_CD") %>%
+  print()
+
+```
+
+```{r}
+
+# 3️⃣ 지역 구분용 prefix 목록
+province_i <- 161:174
+province_s <- 100:129
+province_g <- 200:249
+province_b <- 130:149
+province_d <- 183:191
+
+# 4️⃣ LINK_ID 앞 3자리로 region 할당 후 NA 아닌 것만 필터
+info_map_with_region <- info_map_with_linkid %>%
+  mutate(
+    prefix = as.integer(substr(LINK_ID, 1, 3)),
+    region = case_when(
+      prefix %in% province_i ~ "incheon",
+      prefix %in% province_s ~ "seoul",
+      prefix %in% province_g ~ "gyeonggi",
+      prefix %in% province_b ~ "busan",
+      prefix %in% province_d ~ "daejeon",
+      
+      TRUE                 ~ NA_character_
+    )
+  ) %>% dplyr::select(-prefix) %>%
+  left_join(czn_region_map, by = "CZN_CD") %>%
+  mutate(region = coalesce(region, region_missing)) %>%
+  dplyr::select(- region_missing) %>%
+  print()
+
+info_map_with_region_filtered <- info_map_with_region %>%
+  filter(region %in% c("incheon", "seoul", "gyeonggi", "busan", "daejeon"))
+
+# 5️⃣ 지역별 관측 행 수 확인
+print( info_map_with_region_filtered %>% count(region) )
+
+# 6️⃣ 전체 고유 LINK_ID 개수
+cat("▶ Unique LINK_ID count:", n_distinct(info_map_with_region_filtered$LINK_ID), "\n")
+
+
+# 6️⃣ 전체 고유콘존 개수
+cat("▶ Unique CZN_CD count:", n_distinct(info_map_with_region_filtered$CZN_CD), "\n")
+# 7️⃣ 지역별 고유 ROAD_NAME 목록 및 개수
+route_summary <- info_map_with_region_filtered %>%
+  group_by(region) %>%
+  summarise(
+    n_routes = n_distinct(ROAD_NAME),
+    routes   = paste(sort(unique(ROAD_NAME)), collapse = ", "),
+    .groups  = "drop"
+  )
+
+print(route_summary)
+
+# 8️⃣ 모든 지역의 route 수 합계
+cat("▶ Total routes across regions:", sum(route_summary$n_routes), "\n")
+
+# 9️⃣ 결측치 요약
+print( summary(is.na(route_summary)) )
+
+
+```
+
+▶ Unique LINK_ID count: 2808 
+▶ Unique CZN_CD count: 717 
+▶ Total routes across regions: 60 
+   region         n_routes         routes       
+ Mode :logical   Mode :logical   Mode :logical  
+ FALSE:5         FALSE:5         FALSE:5     
+
+
+#Deviding Sunhwan road
+
+```{r}
+library(stringr)              # 매 세션마다 로드
+library(tidyr)
+# 2) info_map_with_region_filtered에서 routeNM 분리 (원본 보존)
+devided_routes <- info_map_with_region_filtered %>%
+  separate(routeNM, into = c("start_full", "end_full"), 
+           sep = "-", remove = FALSE)
+
+# 3) 접미사 제거해서 기본 이름만
+devided_routes <- devided_routes %>%
+  mutate(
+    start = str_remove(start_full, "(IC|JC|TG)$"),
+    end   = str_remove(end_full,   "(IC|JC|TG)$")
+  )
+
+# 4) 세그먼트별 기준 벡터
+#seg1 <- c("퇴계원","구리","남양주","토평","강일","상일","하남")
+#seg2 <- c("하남","서하남","송파","성남","판교")
+#seg3 <- c("판교","청계","학의","평촌","산본","조남","도리","안현")
+#seg4 <- c("안현","시흥","장수","송내","중동","서운","계양","노오지","김포","자유로")
+#seg5 <- c("자유로","고양","일산","통일로","양주","송추","호원","별내","의정부","퇴계원")
+
+#일산~중동~시흥 구간 (부천고가교 구간)
+seg1 <- c("일산", "자유로", "김포", "노오지", "계양", "서운", "중동", "송내", "장수", "시흥")
+#산본~평촌~성남 구간(남부구간)
+seg2 <- c("시흥", "안현", "도리", "조남", "산본", "평촌", "학의", "청계", "판교", "성남")
+seg3 <- c("성남", "송파", "서하남", "하남", "상일", "강일", "토평", "남양주", "구리", "퇴계원")
+seg4 <- c("퇴계원","별내","의정부", "호원", "송추","양주", "통일로", "고양","일산")
+
+# 5) case_when 으로 순환선만 덮어쓰기, 나머지는 그대로
+sunhwan_all <- devided_routes %>%
+  mutate(
+    ROAD_NAME = case_when(
+      # 원래 순환선이면서 start/end 둘 다 seg1
+      ROAD_NAME == "수도권제1순환선" & start %in% seg1 & end %in% seg1 ~
+        "수도권제1순환로_일산-시흥",
+      ROAD_NAME == "수도권제1순환선" & start %in% seg2 & end %in% seg2 ~
+        "수도권제1순환로_시흥-성남",
+      ROAD_NAME == "수도권제1순환선" & start %in% seg3 & end %in% seg3 ~
+        "수도권제1순환로_성남-퇴계원",
+      ROAD_NAME == "수도권제1순환선" & start %in% seg4 & end %in% seg4 ~
+        "수도권제1순환로_퇴계원-일산",
+#      ROAD_NAME == "수도권제1순환선" & start %in% seg5 & end %in% seg5 ~
+#        "수도권제1순환로_자유로-퇴계원",
+      # 이 외의 모든 행은 기존 이름 유지
+      TRUE ~ ROAD_NAME
+    )
+  ) %>%
+  dplyr::select(-start_full, -end_full, -start, -end)
+
+# 6) 결과 확인: 순환로 구간만 바뀌고, 나머지 행도 그대로 남음
+glimpse(sunhwan_all)
+
+
+###순환도로 이름변경 내용
+library(dplyr)
+library(stringr)
+
+result_loop <- sunhwan_all %>%
+  # ① 이름이 ‘수도권제1순환로_’로 바뀐 도로만
+  filter(str_detect(ROAD_NAME, "^수도권제1순환로_")) %>%
+  distinct()  # 중복 제거, 필요 없으면 빼도 됩니다
+
+# 결과 확인
+glimpse(result_loop)
+
+
+```
+length(unique(sunhwan_all$CZN_CD))
+[1] 717
+
+
+#===
+# completed raw data: "donor_filtered_all"
+#===
+
+
+```{r}
+
+# 1) 기준 날짜 범위 정의
+start_date <- as.Date("2023-01-01")
+end_date   <- as.Date("2025-03-31")
+
+
+df_hr08 <- donor_daily_raw %>%
+  # (가정: SUM_YRMTHDAT이 "YYYYMMDD" 형식의 문자열일 때)
+  mutate(
+    SUM_YRMTHDAT = as.Date(SUM_YRMTHDAT, format = "%Y%m%d")
+  ) %>%
+  filter(SUM_HR == "08")
+```
+
+```{r}
+
+# 3) CZN_CD별로 날짜 시퀀스(2023-01-01 ~ 2025-03-31) 채우기
+df_hr08_complete <- df_hr08 %>%
+  select(CZN_CD, SUM_YRMTHDAT, TRFFCVLM) %>%
+  group_by(CZN_CD) %>%
+  complete(
+    SUM_YRMTHDAT = seq.Date(start_date, end_date, by = "day"),
+    fill = list(TRFFCVLM = NA)
+  ) %>%
+  ungroup()
+# → tidyr::complete()가 각 CZN_CD마다 지정한 날짜 시퀀스를 모두 만들고,
+#    기존에 없던 날짜는 TRFFCVLM=NA로 채워줍니다  [oai_citation:0‡blog.exploratory.io](https://blog.exploratory.io/populating-missing-dates-with-complete-and-fill-functions-in-r-and-exploratory-79f2a321e6b5?utm_source=chatgpt.com).
+
+
+```
+
+
+
+```{r}
+# 4) 콘존별 결측 비율 계산
+missing_rates <- df_hr08_complete %>%
+  group_by(CZN_CD) %>%
+  summarise(
+    total_days   = n(),                          # 하루 하나씩, total = (end_date–start_date+1)
+    missing_days = sum(is.na(TRFFCVLM)),         # TRFFCVLM이 NA인 날
+    missing_rate = missing_days / total_days,    # 결측 비율
+    .groups      = "drop"
+  )
+```
+
+```{r}
+library(dplyr)
+
+# 1) missing_rates에 result_loop 도로 정보 붙이기
+missing_with_info <- missing_rates %>%
+  left_join(
+    sunhwan_all %>%
+      select(
+        CZN_CD, length, direction, lanes, routeNum,
+        limit_kmh, routeNM, bus, rank,
+        ROAD_NAME, LINK_ID, region
+      ),
+    by = "CZN_CD"
+  )
+
+# 2) 지역(region)·도로(ROAD_NAME)별로 결측 비율 최저 콘존 선택
+best_per_road_dir <- missing_with_info %>%
+  group_by(region, ROAD_NAME, direction) %>%       # 방향 추가
+  filter(missing_rate == min(missing_rate, na.rm = TRUE)) %>%
+  slice_head(n = 1) %>%                            # 동률 시 첫 번째
+  ungroup()
+
+# 3) 결과 보기
+best_per_road %>%
+  select(
+    region, ROAD_NAME, CZN_CD, length, direction, lanes,
+    routeNum, limit_kmh, routeNM, bus, rank,
+    LINK_ID, total_days, missing_days, missing_rate
+  )
+```
+
+
+```{r}
+
+library(dplyr)
+
+final_selection_no_seoul <- best_per_road_dir %>%
+  filter(missing_rate <= 0.15) %>%               # 결측 15% 이하
+  group_by(region, ROAD_NAME) %>%
+  filter(n_distinct(direction) == 2) %>%         # 양방향 모두 있는 도로
+  ungroup() %>%
+  filter(region != "seoul")                      # 서울 지역 제외
+
+# 결과 확인
+final_selection_no_seoul %>%
+  select(
+    region, ROAD_NAME, direction,
+    CZN_CD, total_days, missing_days, missing_rate,
+    length, lanes, routeNum, limit_kmh,
+    routeNM, bus, rank, LINK_ID
+  )
+```
+
+
+```{r}
+library(dplyr)
+
+# 1) final_selection_no_seoul에서 CZN_CD–region 매핑만 뽑기
+sel_czn_region <- final_selection_no_seoul %>%
+  select(CZN_CD, region, direction) %>%
+  distinct()
+
+```
+
+```{r}
+# 2) donor_daily_raw → Date 변환 후 필터링 & region/direction 결합
+all_hours_selected <- donor_daily_raw %>%
+  mutate(
+    SUM_YRMTHDAT = as.Date(SUM_YRMTHDAT, "%Y%m%d")
+  ) %>%
+  filter(
+    SUM_YRMTHDAT >= as.Date("2023-01-01"),
+    SUM_YRMTHDAT <= as.Date("2025-03-31"),
+    CZN_CD %in% sel_czn_region$CZN_CD
+  ) %>%
+  left_join(sel_czn_region, by = "CZN_CD")
+```
+
+```{r}
+# 3) 중복 제거, 숫자 변환, -1·0 → NA 처리
+all_hours_clean <- all_hours_selected %>%
+  distinct() %>%
+  mutate(
+    TRFFCVLM = as.numeric(TRFFCVLM),
+    SPD_AVG  = as.numeric(SPD_AVG),
+    TRFFCVLM = na_if(TRFFCVLM, -1),
+    TRFFCVLM = na_if(TRFFCVLM,  0),
+    SPD_AVG  = na_if(SPD_AVG,  -1),
+    SPD_AVG  = na_if(SPD_AVG,   0)
+  )
+
+```
+
+```{r}
+# 4) 콘존별 위경도 테이블 추출 후 1:1 매핑
+road_geo_one <- all_hours_clean %>%
+  select(CZN_CD, ST_ND_GPS_LAT, ST_ND_GPS_LONG) %>%
+  distinct() %>%
+  group_by(CZN_CD) %>%
+  slice_head(n = 1) %>%
+  ungroup()
+```
+
+```{r}
+# 5) sunhwan_all에서 도로 메타데이터 추출하고 GPS 결합 → road_info
+road_info <- sunhwan_all %>%
+  select(
+    CZN_CD, length, direction, lanes, routeNum,
+    limit_kmh, routeNM, bus, rank,
+    ROAD_NAME,direction, LINK_ID, region
+  ) %>%
+  distinct() %>%
+  left_join(road_geo_one, by = "CZN_CD")
+
+# 6) all_hours_clean에서 위경도 컬럼 삭제
+all_hours_selected_proc <- all_hours_clean %>%
+  select(-ST_ND_GPS_LAT, -ST_ND_GPS_LONG)
+
+
+
+```
+
+```{r}
+czn_to_name <- road_info %>%
+  select(CZN_CD, ROAD_NAME) %>%
+  distinct()
+# distinct()로 중복된 CZN_CD-ROAD_NAME 조합은 하나만 남깁니다  [oai_citation:0‡rdocumentation.org](https://www.rdocumentation.org/packages/dplyr/versions/0.7.8/topics/join?utm_source=chatgpt.com)
+```
+
+
+```{r}
+all_hours_selected_proc2<- all_hours_selected_proc %>%
+  left_join(czn_to_name, by = "CZN_CD") 
+# 이제 all_hours_selected_proc 에 ROAD_NAME 컬럼이 추가됩니다  [oai_citation:1‡statology.org](https://www.statology.org/left-join-in-r/?utm_source=chatgpt.com) 
+```
+
+
+```{r}
+raw_donor <- all_hours_selected_proc2 %>%
+  rename(roadName = "ROAD_NAME",
+         direction = "direction",
+         day_start = "SUM_YRMTHDAT",
+         hour = "SUM_HR",
+         number = "CZN_CD",
+         traffic = "TRFFCVLM",
+         speed = "SPD_AVG") %>%
+  select(-ST_ND_NM)
+
+```
+
+## 전 시간 버전으로 저장
+```{r}
+write.csv(raw_donor,"/Users/maeg/Downloads/Thesis_Materials/daily_all_neat/raw_donors.csv", row.names = FALSE, fileEncoding = "CP949")
+```
+
+
+
+
+#주별데이터로 정리 + 대전+인천 ### <<대전데이터 가져오기>>
+#region_monthly_full_final
+#===
+
+```{r}
+
+# 스크립트 상단에 추가
+library(lubridate)
+
+daejeon <- read_csv(
+  "/Users/maeg/Downloads/Thesis_Materials/daejeon/final_daejeon.csv",
+  locale = locale(encoding = "CP949"),   # ← **핵심!**
+  show_col_types = FALSE
+) %>% 
+  mutate(
+    SUM_YRMTHDAT     = ymd(Week_Start),
+    region           = "daejeon",
+    ROAD_NAME        = as.character(road),
+    TRFFCVLM         = as.numeric(TRFFCVLM),
+    SPD_AVG          = as.numeric(SPD_AVG)
+  ) %>% 
+  select(SUM_YRMTHDAT, region, ROAD_NAME, TRFFCVLM, SPD_AVG)
+
+daejeon
+
+```
+
+
+
+```{r}
+
+library(readr)
+library(dplyr)
+library(lubridate)  # ym() 쓰실 경우
+
+
+incheon1 <- read_csv(
+  "/Users/maeg/Downloads/Thesis_Materials/incheon/weekly_full_incheon.csv",
+  col_types = cols(
+    ROAD_NAME    = col_character(),
+    WEEK_START = col_date(format = "%Y-%m-%d"),  # 이미 "2022-11-01" 형태이므로 Date 로 바로 읽기
+    TRFFCVLM     = col_double(),
+    SPD_AVG      = col_double()
+  ),
+  show_col_types = FALSE
+) %>%
+  rename(         SUM_YRMTHDAT = "WEEK_START") %>%
+  # region 컬럼 모두 "incheon" 으로 추가
+  mutate(region = "incheon")
+
+
+summary(is.na(incheon1))
+```
+#================================================
+#!!!!!!!!!You should add daejeon when you finish preprocess the daejeon data!!!!
+#===================================================
+#서울문산지선 삭제
+
+```{r}
+
+# ── 2) 월별 지역 평균 교통량 계산 
+
+
+region_weekly_full <- bind_rows(donor_weekly, daejeon
+                                 ) %>%
+  arrange(region, SUM_YRMTHDAT)
+
+region_weekly_full_final <- bind_rows(region_weekly_full, incheon1) %>%
+  arrange(region, SUM_YRMTHDAT) %>%
+  filter(!ROAD_NAME %in% "서울문산지선")
+  
+
+
+#region_monthly_full_final %>% 
+#  mutate(
+#    ST_ND_GPS_LONG = replace(
+#      ST_ND_GPS_LONG,
+#      ROAD_NAME == "부산외곽선",
+#      129.005021
+#    ),
+#    ST_ND_GPS_LAT = replace(
+#      ST_ND_GPS_LAT,
+#      ROAD_NAME == "부산외곽선",
+#      35.271283
+#    )
+#  )
+
+
+print(region_weekly_full_final)
+
+region_weekly_full_final %>%
+  filter(
+    region    == "gyeonggi",
+    ROAD_NAME == "경부선",
+    SUM_YRMTHDAT == "2024-02-01"
+  ) %>%
+  print()
+
+
+summary(is.na(region_weekly_full_final))
+
+
+region_weekly_full_final %>%
+     # ① 이름이 ‘수도권제1순환로_’로 바뀐 도로만
+     filter(str_detect(ROAD_NAME, "^수도권제1순환로_안현"))
+
+region_weekly_full_final %>%
+  filter(
+    str_detect(ROAD_NAME, "^수도권제1순환로_시흥")
+  ) %>%
+  print()
+
+region_weekly_full_final %>% 
+  filter(!complete.cases(.))          # ← NA 가 있는 행만 반환
+```
+
+
+
+
+#====
+#Visualizing
+#====
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(scales)   # comma()
+
+# ─────────────────────────────────────────────────────────────
+# 부산 버전
+# ─────────────────────────────────────────────────────────────
+busan_only <- region_weekly_full_final %>%
+  mutate(SUM_YRMTHDAT = as.Date(SUM_YRMTHDAT)) %>%
+  filter(region == "busan") %>%
+  filter(year(SUM_YRMTHDAT) == 2024)
+
+# 결측치 요약
+print(busan_only)
+print(summary(is.na(busan_only)))
+
+# 박스플롯 + 중앙값 텍스트
+ggplot(busan_only, aes(x = ROAD_NAME, y = TRFFCVLM)) +
+  geom_boxplot(outlier.colour = "red", outlier.size = 1.5) +
+  stat_summary(
+    fun     = median,
+    geom    = "text",
+    aes(label = comma(round(..y.., 1))),
+    vjust   = -0.4,
+    size    = 3
+  ) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "부산 지역 일별 교통량(TRFFCVLM) 분포 및 중앙값",
+    x     = "도로명",
+    y     = "교통량 (대/일)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title  = element_text(size = 13, face = "bold")
+  )
+
+#=============================================================
+# 대전 버전
+# =============================================================
+daejeon_only <- region_weekly_full_final %>%
+  mutate(SUM_YRMTHDAT = as.Date(SUM_YRMTHDAT)) %>%
+  filter(region == "daejeon") %>%
+  filter(year(SUM_YRMTHDAT) == 2024)
+
+# 결측치 요약
+print(daejeon_only)
+print(summary(is.na(daejeon_only)))
+
+# 박스플롯 + 중앙값 텍스트
+ggplot(daejeon_only, aes(x = ROAD_NAME, y = TRFFCVLM)) +
+  geom_boxplot(outlier.colour = "red", outlier.size = 1.5) +
+  stat_summary(
+    fun     = median,
+    geom    = "text",
+    aes(label = comma(round(..y.., 1))),
+    vjust   = -0.4,
+    size    = 3
+  ) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "대전 지역 일별 교통량(TRFFCVLM) 분포 및 중앙값",
+    x     = "도로명",
+    y     = "교통량 (대/일)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title  = element_text(size = 13, face = "bold")
+  )
+
+
+# ─────────────────────────────────────────────────────────────
+# 경기 버전
+# ─────────────────────────────────────────────────────────────
+gyeonggi_only <- region_weekly_full_final %>%
+  mutate(SUM_YRMTHDAT = as.Date(SUM_YRMTHDAT)) %>%
+  filter(region == "gyeonggi") %>%
+  filter(year(SUM_YRMTHDAT) == 2024)
+
+# 결측치 요약
+print(gyeonggi_only)
+print(summary(is.na(gyeonggi_only)))
+
+# 박스플롯 + 중앙값 텍스트
+ggplot(gyeonggi_only, aes(x = ROAD_NAME, y = TRFFCVLM)) +
+  geom_boxplot(outlier.colour = "red", outlier.size = 1.5) +
+  stat_summary(
+    fun     = median,
+    geom    = "text",
+    aes(label = comma(round(..y.., 1))),
+    vjust   = -0.4,
+    size    = 3
+  ) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "경기 지역 일별 교통량(TRFFCVLM) 분포 및 중앙값",
+    x     = "도로명",
+    y     = "교통량 (대/일)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title  = element_text(size = 13, face = "bold")
+  )
+
+
+# ─────────────────────────────────────────────────────────────
+# 경기 버전
+# ─────────────────────────────────────────────────────────────
+seoul_only <- region_weekly_full_final %>%
+  mutate(SUM_YRMTHDAT = as.Date(SUM_YRMTHDAT)) %>%
+  filter(region == "seoul") %>%
+  filter(year(SUM_YRMTHDAT) == 2024)
+
+# 결측치 요약
+print(seoul_only)
+print(summary(is.na(seoul_only)))
+
+# 박스플롯 + 중앙값 텍스트
+ggplot(seoul_only, aes(x = ROAD_NAME, y = TRFFCVLM)) +
+  geom_boxplot(outlier.colour = "red", outlier.size = 1.5) +
+  stat_summary(
+    fun     = median,
+    geom    = "text",
+    aes(label = comma(round(..y.., 1))),
+    vjust   = -0.4,
+    size    = 3
+  ) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "서울 지역 일별 교통량(TRFFCVLM) 분포 및 중앙값",
+    x     = "도로명",
+    y     = "교통량 (대/일)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title  = element_text(size = 13, face = "bold")
+  )
+
+# ─────────────────────────────────────────────────────────────
+# 인천 버전
+# ─────────────────────────────────────────────────────────────
+incheon_only <-region_weekly_full_final %>%
+  mutate(SUM_YRMTHDAT = as.Date(SUM_YRMTHDAT)) %>%
+  filter(region == "incheon") %>%
+  filter(year(SUM_YRMTHDAT) == 2024)
+
+# 결측치 요약
+print(incheon_only)
+print(summary(is.na(incheon_only)))
+
+# 박스플롯 + 중앙값 텍스트
+ggplot(incheon_only, aes(x = ROAD_NAME, y = TRFFCVLM)) +
+  geom_boxplot(outlier.colour = "red", outlier.size = 1.5) +
+  stat_summary(
+    fun     = median,
+    geom    = "text",
+    aes(label = comma(round(..y.., 1))),
+    vjust   = -0.4,
+    size    = 3
+  ) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "인천 지역 일별 교통량(TRFFCVLM) 분포 및 중앙값",
+    x     = "도로명",
+    y     = "교통량 (대/일)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title  = element_text(size = 13, face = "bold")
+  )
+
+
+
+```
+
+
+
+
+#=============================
+****donor pool 최종 정리
+---
+전체 날자에 대한 적용
+---
+#=============================
+
+
+#월별 시각화******************
+#===
+
+```{r}
+library(ggplot2)
+library(scales)
+
+
+donor_no_outlier <- region_weekly_full_final %>%
+  filter(!(region == "busan" & ROAD_NAME == "경부선" & TRFFCVLM > 300000))
+
+# ── 3) 플롯 1: 월별 지역 평균 교통량
+ggplot(donor_no_outlier, aes(x = SUM_YRMTHDAT, y = TRFFCVLM, color = region, grup = region)) +
+  geom_line(size = 1) +
+  scale_x_date(date_labels = "%Y-%m", date_breaks = "1 month") +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "월별 지역 평균 교통량",
+    x     = "연월",
+    y     = "평균 교통량 (대/일)",
+    color = "지역"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title  = element_text(face = "bold")
+  )
+
+# A) 지역별 월평균 교통량 분포 + 중앙값 텍스트
+ggplot(donor_no_outlier, aes(x = region, y = TRFFCVLM)) +
+  geom_boxplot(outlier.colour = "red") +
+  stat_summary(
+    fun     = median,
+    geom    = "text",
+    aes(label = comma(round(..y.., 1))),
+    vjust   = -0.5,
+    size    = 3,
+    color   = "blue"
+  ) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "지역별 월평균 교통량 분포",
+    x     = "지역",
+    y     = "ADT (대/일)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title  = element_text(face = "bold")
+  )
+```
+
+```{r}
+# B) 지역별·도로별 월평균 교통량 분포 + 중앙값 텍스트 (facet)
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+ggplot(donor_no_outlier, aes(x = ROAD_NAME, y = TRFFCVLM)) +
+  geom_boxplot(outlier.colour = "red") +
+  stat_summary(
+    fun     = median,
+    geom    = "text",
+    aes(label = comma(round(..y..,0))),
+    vjust   = -0.5,
+    size    = 3,
+    color   = "darkgreen"
+  ) +
+  facet_wrap(
+    ~ region,
+    scales = "free_x",   # ← 각 패싯이 자기 도로명만 x축에 표시
+    ncol   = 3
+  ) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "지역별·도로별 월평균 교통량 분포",
+    x     = "도로명",
+    y     = "ADT (대/일)"
+  ) +
+  theme(
+    axis.text.x       = element_text(angle = 45, hjust = 1, size = 7),
+    strip.text        = element_text(face = "bold"),
+    strip.background  = element_blank(),
+    panel.spacing     = unit(1, "lines")
+  )
+```
+
+
+
+
+
+```{r}
+library(dplyr)
+library(scales)  # comma()
+
+# 1️⃣ ADT 숫자형 변환 (필요 시)
+donorpool_adt <- region_weekly_full_final %>%
+  mutate(traffic = as.numeric(TRFFCVLM))
+
+
+# 1️⃣ 요약 테이블 생성
+donor_region_road_summary <- donorpool_adt %>%
+  group_by(region, ROAD_NAME) %>%
+  summarise(
+    n          = n(),                                  # 총 행 수
+    missing_traffic    = sum(is.na(traffic)),
+    missing_spd = sum(is.na(SPD_AVG)), # 결측치 개수
+    median_ADT = median(traffic, na.rm = TRUE),           # 중앙값
+    mean_ADT   = mean(traffic, na.rm = TRUE),             # 평균
+    .groups    = "drop"
+  ) %>%
+  arrange(region, ROAD_NAME)
+
+# 2️⃣ 결과 확인
+print(donor_region_road_summary)
+
+# 3️⃣ 예쁘게 출력 (knitr::kable)
+if (requireNamespace("knitr", quietly=TRUE)) {
+  knitr::kable(
+    donor_region_road_summary,
+    digits = c(0, 0, 0, 1, 1),
+    format.args = list(big.mark = ","),
+    caption = "지역별·도로별 ADT 요약"
+  )
+}
+```
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scales)   # comma()
+
+donor_no_outlier <- region_weekly_full_final %>%
+  filter(!(region == "busan" & ROAD_NAME == "경부선" & TRFFCVLM > 300000))
+
+
+# 2️⃣ 한글 폰트 설정 (한 번만)
+theme_set(theme_bw(base_family = "main"))
+
+# 3️⃣ 지역별·도로별 박스플롯
+ggplot(donor_no_outlier, aes(x = ROAD_NAME, y = TRFFCVLM)) +
+  geom_boxplot(outlier.colour = "red", outlier.size = 1) +
+  stat_summary(
+    fun     = median,
+    geom    = "text",
+    aes(label = comma(round(..y.., 0))),
+    vjust   = -0.5,
+    size    = 2.5,
+    color   = "blue"
+  ) +
+  facet_wrap(~ region, scales = "free_x", ncol = 2) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Distribution and median of daily traffic volume (TRFFCVLM) by region and road",
+    x     = "Road name",
+    y     = "Traffic volume (vehicles per day)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    strip.text  = element_text(face = "bold"),
+    plot.title  = element_text(size = 14, face = "bold")
+  )
+```
+
+
+
+#============================================
+#서울 데이터 가공
+#=============================================
+
+#==========================
+#서울데이터 정리
+#==========================
+
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(googledrive)
+
+
+# 시간 컬럼 이름 정의 (hour00, hour01, ..., hour23)
+hour_cols <- paste0("hour", sprintf("%02d", 0:23))
+
+### 1. 엑셀 파일 읽기 및 데이터 결합, 전처리
+# 엑셀 파일 경로 설정
+file_paths <- list.files("/Users/maeg/Downloads/traffic_excel", full.names = TRUE)
+
+# 파일별 데이터를 저장할 리스트 초기화
+data_list <- list()
+
+for (file in file_paths) {
+  # 파일명 추출 (필요시 사용)
+  file_name <- basename(file)
+  
+  # 시트 2의 데이터 읽기
+  dat <- read_excel(file, sheet = 2)
+  
+  # 모든 값이 NA인 열 제거
+  dat <- dat[, colSums(is.na(dat)) < nrow(dat)]
+  
+  # '지점번호' 컬럼이 있는지 확인 후, "F-"가 포함된 행만 필터링
+  if ("지점번호" %in% names(dat)) {
+    dat <- dat[grep("F-", dat$지점번호), ]
+  } else {
+    warning(paste("파일", file_name, "에 '지점번호' 컬럼이 존재하지 않습니다. 해당 파일은 건너뜁니다."))
+    next
+  }
+  
+  data_list[[length(data_list) + 1]] <- dat
+}
+
+# 리스트의 데이터를 결합
+all_data <- bind_rows(data_list)
+
+# 결합 후, 모든 값이 NA인 열 제거
+all_data <- all_data[, colSums(is.na(all_data)) < nrow(all_data)]
+
+# 불필요한 열(예: "월", "요일(2)") 제거
+cols_to_remove <- c("월","요일", "요일(2)")
+all_data_seoul <- all_data %>% dplyr::select(-all_of(cols_to_remove))
+
+# 열 이름 변경 (여기서는 day_start, Day, Road, Number, Direction, Path, 그리고 0~23)
+colnames(all_data_seoul) <- c("day_start","roadName", "number", "direction", "path",
+  "hour00", "hour01", "hour02", "hour03", "hour04", "hour05", "hour06", "hour07", "hour08", "hour09",
+                        "hour10", "hour11", "hour12", "hour13", "hour14", "hour15", "hour16", "hour17", "hour18",
+                      "hour19", "hour20", "hour21", "hour22", "hour23")
+
+# 도로 이름 영어로 변경
+all_data_seoul <- all_data_seoul %>%
+  mutate(roadName = case_when(
+    roadName == "올림픽대로" ~ "OlympicRoad",
+    roadName == "강변북로" ~ "Gangbyeonbuk",
+    roadName == "내부순환로" ~ "InnerCircle",
+    roadName == "북부간선로" ~ "BukbuGanseon",
+    roadName == "동부간선도로" ~ "DongbuGanseon",
+    roadName == "경부고속도로" ~ "GyeongbuExpressway",
+    roadName == "분당수서로" ~ "BundangSuseo",
+    roadName == "강남순환로" ~ "GangnamLoop",
+    roadName == "서부간선도로" ~ "SeobuGanseon",
+    roadName == "서부간선지하도로" ~ "SeobuGanseon",
+    roadName == "신월여의지하도로" ~ "Sinwol",
+    TRUE ~ roadName
+  ))
+
+# Direction 변경: "유입" -> 1, "유출" -> 0
+all_data_seoul$direction[all_data_seoul$direction == "유입"] <- 1
+all_data_seoul$direction[all_data_seoul$direction == "유출"] <- 0
+
+
+# Path 열 제거
+all_data_seoul <- all_data_seoul %>% dplyr::select(-path)
+
+
+# 최종 데이터 저장 (원한다면)
+write.csv(all_data_seoul, "/Users/maeg/Downloads/Thesis_Materials/raw_data/seoul/seoul_data.csv", row.names = FALSE)
+
+
+# day_start를 날짜형으로 변환하고 2021년 이후 데이터만 필터링 후, 주의 시작일(Week_Start) 계산
+seoul_data_filtered_21to25 <- all_data_seoul %>% 
+  mutate(day_start = ymd(as.numeric(day_start))) %>%
+  filter(year(day_start) %in% c(2021:2025))
+
+
+head(seoul_data_filtered_21to25)
+```
+
+
+
+
+#서울 영역 2021~ 2025년 원본 데이터 가공하기
+#===============================================
+
+```{r}
+
+# 원본 데이터에 행 존재 여부를 나타내는 indicator 추가 (존재하면 TRUE)
+start_date <- as.Date("2021-01-01")
+end_date <- as.Date("2025-03-31")
+
+# 원본 데이터에 행 존재 여부를 나타내는 indicator 추가 (존재하면 TRUE)
+seoul_data_with_indicator <- seoul_data_filtered_21to25 %>%
+  mutate(original = TRUE)
+
+
+
+###결측치 채우기
+
+seoul_data_complete <- seoul_data_with_indicator %>%
+  group_by(roadName, number, direction) %>%
+  complete(day_start = seq.Date(min(start_date), max(end_date), by = "day"),
+           fill = list(original = FALSE)) %>%
+  ungroup()
+
+s.donor.raw <- seoul_data_complete
+
+
+write.csv(seoul_data_complete, "/Users/maeg/Downloads/Thesis_Materials/seoul/seoul_traffic_raw.csv", row.names=FALSE)
+
+# 하루별로 NA 또는 0인 셀의 개수를 계산
+# (하루 전체가 누락이면 missing_count는 length(hour_cols), 즉 24가 됨)
+s.donor.raw_na <- s.donor.raw %>%
+  mutate(missing_count = rowSums(across(all_of(hour_cols), ~ is.na(.) | . == 0)))
+
+# 노드링크별로 2년 동안의 총 누락값(셀 단위)과 전체 가능한 셀 수, 결측치 비율 계산
+node_missing_summary_seoul <- s.donor.raw_na %>%
+  group_by(roadName, number, direction, day_start) %>%
+  summarise(
+    total_missing = sum(missing_count, na.rm = TRUE),              # 2년 동안 누락된 셀의 합
+    total_missing_days = sum(if_else(missing_count == length(hour_cols), 1, 0)),  # 하루 전체가 누락된 날의 개수
+    total_possible = n() * length(hour_cols),                        # 2년 동안의 전체 셀 수 (날짜 수 * 24)
+    missing_rate = total_missing / total_possible,                   # 셀 단위 결측치 비율
+    .groups = "drop"
+  )
+
+print(node_missing_summary_seoul)
+
+```
+
+#서울 결측치 확인. 
+
+```{r}
+
+# 시간 컬럼 이름 정의 (hour00, hour01, ..., hour23)
+hour_cols <- paste0("hour", sprintf("%02d", 0:23))
+
+# 0시~23시 열을 Long 형식으로 변환: Hour와 Traffic 열 생성
+traffic_long_seoul <- s.donor.raw_na %>% 
+  pivot_longer(
+    cols = `hour00`:`hour23`,
+    names_to = "Hour",
+    values_to = "Traffic"
+  ) %>% 
+  mutate(
+    Hour = as.numeric(str_remove(Hour, "hour")), # "hour" 문자 제거 후 numeric 변환
+    Missing = if_else(is.na(Traffic), "Missing", "Present")
+  )
+
+# Heatmap 1: 모든 주에 대해 원본 결측치 분포 확인
+ggplot(traffic_long_seoul, aes(x = day_start, y = Hour, fill = Missing)) +
+  geom_tile() +
+  facet_wrap(~ roadName, ncol = 2) +
+  scale_y_continuous(breaks = 0:23) +
+  scale_fill_manual(values = c("Missing" = "red", "Present" = "white")) +
+  labs(title = "Heatmap 1: Missing Traffic Data by roadName and Date (All Weeks)",
+       x = "Date", y = "Hour") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 각 도로별, 주(Week_Start) 단위로 결측치 총 셀 수, NA 개수, NA 비율(rate) 계산
+na_summary_weekly <- traffic_long_seoul %>% 
+  group_by(roadName) %>% 
+  summarise(
+    total_cells = n(),
+    NA_Count = sum(is.na(Traffic)),
+    rate = NA_Count / total_cells,
+    .groups = "drop"
+  )
+
+# 결과 확인
+print(na_summary_weekly)
+
+```
+
+#===============================
+#서울 주별 평균 데이터 뽑기
+#=========================
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+# 1. day_start를 날짜형으로 변환하고, 2021년 이후 데이터만 선택하며 주 시작일 및 주 번호 부여
+daily_data <- s.donor.raw_na  %>% 
+  mutate(
+    day_start = ymd(as.character(day_start)),
+    Week_Start = floor_date(day_start, "week", week_start=6),
+    Week_Number = dense_rank(Week_Start)
+  ) %>% 
+    filter(
+    day_start >= as.Date("2022-11-01") &
+    day_start <= as.Date("2025-03-31")
+  )
+
+```
+#### 서울 데이터 보간
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(zoo)    # na.approx·na.locf
+
+long <- daily_data %>%                                         
+  pivot_longer(
+    cols   = starts_with("hour"),               # hour00–hour23
+    names_to  = "hour_str", values_to = "traffic"
+  ) %>% 
+  mutate(
+    hour  = parse_number(hour_str),             # "hour07" → 7
+    ts    = as.POSIXct(day_start) + hours(hour) # 연속 시계열용
+  ) %>% 
+  arrange(roadName, number, direction, ts)
+
+
+filled <- long %>% 
+  group_by(roadName, number, direction) %>% 
+  arrange(ts) %>% 
+
+  # ① 선형 보간 (중간 구간)
+  mutate(traffic = na.approx(traffic, x = ts, na.rm = FALSE)) %>% 
+
+  # ② LOCF/NOCB로 양 끝단 채우기
+  mutate(
+    traffic = zoo::na.locf(traffic, na.rm = FALSE),
+    traffic = zoo::na.locf(traffic, fromLast = TRUE, na.rm = FALSE)
+  ) %>% 
+  ungroup()
+
+daily_filled_seoul <- filled %>% 
+  select(-ts, -hour) %>% 
+  pivot_wider(
+    names_from  = hour_str,
+    values_from = traffic
+  ) %>% 
+  relocate(starts_with("hour"), .after = direction)
+
+```
+
+```{r}
+### 2. 각 날짜별, 도로별, 방향별 일일 총 교통량 계산
+# 여기서는 0시부터 23시까지의 교통량 합계를 Daily_Total로 계산합니다.
+daily_totals <- daily_filled_seoul %>%
+  group_by(day_start, roadName, direction, Week_Start) %>%
+  summarise(Daily_Total = sum(c_across(hour00:hour23), na.rm = TRUE), .groups = "drop")
+
+### 4. 양방(두 방향) 합산: 동일한 날짜와 도로에 대해 방향(0,1)을 합산하여 일일 총 교통량을 계산
+daily_totals_combined <- daily_totals %>%
+  group_by(day_start, roadName, Week_Start) %>%
+  summarise(Daily_Total_Combined = sum(Daily_Total), .groups = "drop")
+
+write.csv(daily_totals_combined, "/Users/maeg/Downloads/Thesis_Materials/daily_totals_combined_filled.csv", row.names=FALSE)
+
+### 5. 각 도로별, 주(Week_Number) 단위로 양방 합산 일일 총 교통량의 주 median 계산
+weekly_median_daily_totals_combined <- daily_totals_combined %>%
+  group_by(roadName, Week_Start) %>%
+  summarise(Weekly_Avg_Daily_Total_Combined = median(Daily_Total_Combined), .groups = "drop")
+write.csv(weekly_median_daily_totals_combined, "weekly_median_daily_totals_combined_filled.csv")
+
+### 6. 각 도로별, 월 단위로 양방 합산 일일 총 교통량의월 median 계산
+monthly_median_traffic_s <- daily_totals_combined %>%
+  mutate(month = floor_date(day_start, "month")) %>%
+  group_by(roadName, month) %>%
+  summarise(monthly_median = median(Daily_Total_Combined), .groups = "drop")
+
+write.csv(monthly_median_traffic_s, "monthly_median_s_filled.csv")
+
+### 6. 각 도로별, 월 단위로 양방 합산 일일 총 교통량의월 mean 계산
+monthly_mean_traffic_s <- daily_totals_combined %>%
+  mutate(month = floor_date(day_start, "month")) %>%
+  group_by(roadName, month) %>%
+  summarise(monthly_mean = round(mean(Daily_Total_Combined)), .groups = "drop")
+
+write.csv(monthly_mean_traffic_s, "monthly_mean_s_filled.csv")
+
+
+#### 2023-2024년 1월 서울 도로 일일 교통량 (합산)
+#daily_median_seoul_2324 <- daily_totals %>%
+#  filter(day_start >= as.Date("2023-01-01") & day_start < as.Date("2024-02-01")) %>%
+#  group_by(day_start, roadName, Week_Start) %>%
+#  summarise(Daily_Total_Combined = mean(Daily_Total), .groups = "drop")
+
+###############weekly_median_daily_totals_combined
+################최종 데이터
+
+
+```
+
+#서울데이터 시각화
+#===============
+
+```{r}
+##도로 평균 계산
+average_traffic_seoul <- daily_totals_combined %>%
+
+  group_by(roadName) %>%
+  summarise(avg_traffic = mean(Daily_Total_Combined, na.rm = TRUE)) %>%
+  ungroup()
+
+
+
+##서울 도로 평균 시각화
+ggplot(data = average_traffic_seoul, aes(x = reorder(roadName, -avg_traffic), y = avg_traffic)) +
+  geom_bar(stat = "identity", fill = "gray") +
+  geom_text(aes(label = round(avg_traffic, 0)), vjust = -0.5, size = 3) +  # 평균 교통량 추가
+  labs(
+    title = "Average Traffic of Each roadName",
+    x = "roadNames",
+    y = "Average Traffic"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+##도로 median 계산
+median_traffic_seoul <- daily_totals_combined %>%
+
+  group_by(roadName) %>%
+  summarise(med_traffic = median(Daily_Total_Combined, na.rm = TRUE)) %>%
+  ungroup()
+
+
+
+##서울 도로 평균 시각화
+ggplot(data = median_traffic_seoul, aes(x = reorder(roadName, -med_traffic), y = med_traffic)) +
+  geom_bar(stat = "identity", fill = "gray") +
+  geom_text(aes(label = round(med_traffic, 0)), vjust = -0.5, size = 3) +  # 평균 교통량 추가
+  labs(
+    title = "Median Traffic of Each roadName",
+    x = "roadNames",
+    y = "Median Traffic"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# 2. 히트맵 그리기
+ggplot(traffic_long_seoul, aes(x = day_start, y = Hour, fill = Missing)) +
+  geom_tile() +
+  facet_wrap(~ roadName, ncol = 2) +
+  scale_y_continuous(breaks = 0:23) +
+  scale_fill_manual(values = c("Missing" = "red", "Present" = "white")) +
+  labs(
+    title = "Heatmap 1: Road-level distribution of missing traffic data for all states",
+    x = "day",
+    y = "time"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    theme(text = element_text(family = "main"))
+
+```
+
+#서울 median/mean box plot 시각화
+#==============================
+```{r}
+
+##median과 mean중 무엇을 신뢰?
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)   # 천 단위 comma 표시용
+
+# 1️⃣ 두 데이터셋을 long 형태로 결합 --------------------------------------------
+median_df <- monthly_median_traffic_s %>%          # ⬅️ median
+  rename(value = monthly_median) %>%
+  mutate(stat = "Median")
+
+mean_df <- monthly_mean_traffic_s %>%              # ⬅️ mean
+  rename(value = monthly_mean) %>%
+  mutate(stat = "Mean")
+
+traffic_long <- bind_rows(median_df, mean_df)
+
+# 2️⃣ 도로별 box plot + 실제 점 --------------------------------------------------
+ggplot(traffic_long,
+       aes(x = roadName, y = value, fill = stat)) +
+  geom_boxplot(width = .6, outlier.shape = NA,
+               position = position_dodge(width = .75), alpha = .4) +
+  # 관측값 점 찍기
+  geom_jitter(aes(color = stat),
+              size = 1.2, alpha = .6,
+              position = position_dodge(width = .75)) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_manual(values = c("Median" = "#1f77b4", "Mean" = "#ff7f0e")) +
+  scale_color_manual(values = c("Median" = "#1f77b4", "Mean" = "#ff7f0e")) +
+  labs(x = NULL,
+       y = "Average Daily Traffic (vehicles)",
+       fill = NULL, color = NULL,
+       title = "Distribution of Average Daily Traffic by Road: Median vs Mean") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(monthly_median_traffic_s)
+```
+
+#서울 최종 데이터 저장
+#===================================================
+
+```{r} 
+
+write.csv(weekly_median_daily_totals_combined, "/Users/maeg/Downloads/Thesis_Materials/raw_data/seoul/seoul_weekly_median_preprocessed.csv")
+
+```
+
+
+
+#================================================
+#서울 속도/교통량 데이터 정리
+speed data that was preprocessed
+#======================
+```{r}
+library(tidyverse)
+library(lubridate)
+
+# 0. 원하는 기간
+start_week <- as.Date("2022-11-01")
+end_week   <- as.Date("2025-03-31")
+
+# 1. speed 데이터
+seoul_speed <- read_csv(
+  "/Users/maeg/Downloads/Thesis_Materials/seoul_speed/weekly_median_daily_totals_combined.csv",
+  show_col_types = FALSE
+) %>% 
+  rename(ROAD_NAME = roadName) %>% 
+  select(-1) %>%                        # 인덱스 열 제거
+  mutate(
+    Week_Start = ymd(Week_Start)        # 문자열 → Date
+  ) %>% 
+  filter(
+    Week_Start >= start_week,
+    Week_Start <= end_week
+  )
+
+# 2. traffic 데이터
+seoul_traffic <- read_csv(
+  "/Users/maeg/Downloads/Thesis_Materials/raw_data/seoul/seoul_weekly_median_preprocessed.csv",
+  locale = locale(encoding = "CP949")
+) %>% 
+  rename(ROAD_NAME = roadName) %>% 
+  select(-1) %>%                       # 인덱스 열 제거
+  mutate(
+    Week_Start = ymd(Week_Start)       # 필요 시 Date 변환
+  ) %>% 
+  filter(
+    Week_Start >= start_week,
+    Week_Start <= end_week
+  )
+
+# 확인
+range(seoul_speed$Week_Start)    # "2022-10-02" ... "2025-03-30" (주 시작일 기준)
+range(seoul_traffic$Week_Start)  # 동일 범위면 OK
+```
+
+
+
+
+#서울데이터 가져오기
+#=================================================
+
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(googledrive)
+library(readr)
+library(ggplot2)
+
+
+
+# 2) 서울 평균 교통량 --------------------------------------------------------
+seoul_traffic_f <- seoul_traffic %>%                                          # 인덱스 열 제거
+  rename(yrmth    = Week_Start,
+         vol_med  = Weekly_Avg_Daily_Total_Combined) %>% 
+  left_join(route_map, by = "ROAD_NAME") %>%                   # 영문→route_id
+  mutate(region = "seoul_from_seoul",
+         yrmth  = as.Date(yrmth)) %>% 
+  dplyr::select(ROAD_NAME, region, yrmth, vol_med)
+
+# 3) 서울 속도·변수 ---------------------------------------------------------
+seoul_speed_f <- seoul_speed %>%                                          # 인덱스 열 제거
+  rename(yrmth    = Week_Start,
+         speed  = Weekly_Avg_Daily_Total_Combined) %>% 
+  left_join(route_map, by = "ROAD_NAME") %>%                   # 영문→route_id
+  mutate(region = "seoul_from_seoul",
+         yrmth  = as.Date(yrmth)) %>% 
+  dplyr::select(ROAD_NAME, region, yrmth, speed)
+
+
+# 4) 병합 -------------------------------------------------------------------
+seoul_final <- seoul_traffic_f %>% 
+  left_join(seoul_speed_f, by = c("ROAD_NAME", "yrmth", "region")) 
+
+seoul_final <- seoul_final %>%
+    rename(SUM_YRMTHDAT = "yrmth",
+          TRFFCVLM = "vol_med",
+         SPD_AVG = "speed")
+ 
+
+# 병합
+# 병합 누락 확인
+#seoulWhatthefuck<- data.frame(
+anti_join(seoul_traffic_f, seoul_speed_f, by = c("ROAD_NAME","yrmth")) %>% nrow()
+
+#)  # 0이면 OK
+
+
+#print(seoul_final) speed_seoul_weekly <- read.csv("speed_daily_totals_combined.csv") %>% select(-1)
+```
+```{r}
+# 2-A. 도로별 주간 통행량 --------------------------------------------------
+ggplot(seoul_final, aes(x = SUM_YRMTHDAT, y = TRFFCVLM)) +
+  geom_line(color = "#004488") +
+  facet_wrap(~ ROAD_NAME, scales = "free_y") +
+  labs(title = "주간 통행량(강변북로 포함) – 도로별",
+       x = "Week (Mon-start)", y = "Traffic volume") +
+  theme_minimal()
+
+# 2-B. 도로별 주간 평균 속도 ----------------------------------------------
+ggplot(seoul_final, aes(x = SUM_YRMTHDAT, y = SPD_AVG)) +
+  geom_line(color = "#BB5566") +
+  facet_wrap(~ ROAD_NAME, scales = "free_y") +
+  labs(title = "주간 평균 속도 – 도로별",
+       x = "Week (Mon-start)", y = "Average speed (km/h)") +
+  theme_minimal()
+```
+
+
+#==================================
+# 3. 서울과 타지역 데이터 합치기
+#====================================================
+
+
+```{r}
+
+summary(seoul_final)
+
+which(rowSums(is.na(seoul_final)) >0)
+#563 589 591 593 강남순환선 속도 데이터가 없어서 삭제해야 할듯
+
+#seoul_final <- seoul_final %>%
+#  filter(!ROAD_NAME %in% "GangnamLoop")
+```
+#서울도너 합치기 ############ㅇ여기로 다시 돌아오기
+```{r}
+
+
+# 둘 다 문자형으로 맞추는 예
+library(dplyr)
+
+donor_final_subset <- region_weekly_full_final %>%
+  mutate(
+    LINK_ID = as.character(LINK_ID))  %>%                       # 인덱스 열 제거
+  mutate(
+    SUM_YRMTHDAT = ymd(SUM_YRMTHDAT)       # 필요 시 Date 변환
+  ) %>% 
+  filter(
+    SUM_YRMTHDAT >= start_week,
+    SUM_YRMTHDAT <= end_week
+  ) 
+
+seoul_final_subset <- seoul_final
+
+combined_final <- bind_rows(donor_final_subset, seoul_final_subset) %>% select(-LINK_ID) %>%
+  filter(!ROAD_NAME %in% c("서울문산지선", "Sinwol"))
+
+print(combined_final)
+
+
+combined_final %>%
+     # ① 이름이 ‘수도권제1순환로_’로 바뀐 도로만
+     filter(str_detect(ROAD_NAME, "^수도권제1순환로_"))
+```
+
+
+```{r}
+
+roads_info <- read_xlsx("/Users/maeg/Downloads/Thesis_Materials/file_info.xlsx")
+
+combined_donor <- combined_final %>%
+  left_join(roads_info, by = c("region", "ROAD_NAME")) %>%
+  filter(!region == "seoul")
+
+summary(combined_donor)
+summary(is.na(combined_donor))
+library(readr)
+
+write_csv(
+  combined_donor,
+  "/Users/maeg/Downloads/Thesis_Materials/combined_donor_weekly.csv"
+)
+
+print(combined_donor)
+
+##qgis를 위해 노드아이디값 빼려면 link_id를 빼야함.
+#link_filtered <- region_monthly_full_final %>%
+#     dplyr::select(LINK_ID, ROAD_NAME, region) %>%
+#     distinct()
+
+#write.csv(link_filtered, "link_filtered.csv", fileEncoding = "CP949", row.names = FALSE)
+
+#write.csv(region_monthly_full_final, "region_monthly_full_final.csv", fileEncoding = "CP949", row.names = FALSE)
+
+combined_donor %>%
+     # ① 이름이 ‘수도권제1순환로_’로 바뀐 도로만
+     filter(str_detect(ROAD_NAME, "^수도권제1순환로_"))
+
+#na확인
+nas <- combined_donor %>% filter(if_any(everything(), is.na))
+
+nas
+```
