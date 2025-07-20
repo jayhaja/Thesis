@@ -1,0 +1,1418 @@
+---
+title: "donor_hourly"
+output: html_document
+date: "2025-06-26"
+---
+
+
+```{r}
+############################################################
+## 0. 패키지 설치·로드
+############################################################
+  # 처음 한 번만
+library(bizdays)
+library(zoo)       
+############################################################
+## 1. 연도별 휴일 벡터 정의  (★ 원하시는 대로 수정 가능)
+
+hol_2023 <- unique(sort(c(
+  # 1) 단일 휴일: 문자열 → Date 변환
+  as.Date(c(
+    "2023-01-01",                             # 신정
+    "2023-01-21","2023-01-23","2023-01-24",   # 설
+    "2023-03-01", "2023-05-01", "2023-05-05","2023-05-27",  # 어린이날·부처님오신날
+    "2023-06-06","2023-07-18", "2023-08-15",   # 7월 18일 폭우
+    "2023-09-28","2023-09-29","2023-09-30",    # 추석
+    "2023-10-02","2023-10-03","2023-10-09",
+    "2023-12-25", "2023-05-29", "2023-08-10"   # 태풍
+  ))
+)))
+
+
+
+
+hol_2024 <- as.Date(c(
+  "2024-01-01",
+  "2024-02-09","2024-02-12",                # 설(+대체)
+  "2024-03-01",   "2024-04-10","2024-05-01", "2024-05-05","2024-05-06",  # 어린이날(+대체)
+  "2024-05-15", 
+  "2024-06-06","2024-08-15",
+  "2024-09-16","2024-09-17","2024-09-18",   # 추석
+  "2024-10-03","2024-10-09",
+  "2024-12-25", "2024-10-01", "2024-10-02", "2024-11-26", "2024-11-27",
+"2024-11-28" #폭설 
+))
+
+
+
+
+
+
+hol_2025 <- unique(sort(c(
+  # 1) 단일 휴일: 문자열 → Date 로 변환
+  as.Date(c(
+    "2025-01-01",
+    "2025-01-27","2025-01-28","2025-01-29","2025-01-30","2025-01-31",
+    "2025-03-01","2025-03-03",
+    "2025-05-05","2025-05-06",
+    "2025-06-06","2025-08-15",
+    "2025-10-03","2025-10-05","2025-10-06","2025-10-07","2025-10-09"
+  )))))
+
+
+## 전체 연도 합치기
+kor_holidays <- sort(unique(c(hol_2023, hol_2024, hol_2025)))
+
+############################################################
+## 2. 주말(토·일) + 공휴일 → ‘KOR’ 달력 생성
+############################################################
+create.calendar(
+  name      = "KOR",
+  holidays  = kor_holidays,
+  weekdays  = c("saturday", "sunday")
+)
+
+############################################################
+## 3. 사용 예시
+############################################################
+# (1) 2024-10-04가 영업일인지?
+is.bizday("2024-10-04", "KOR")
+#> TRUE
+
+# (2) 2024-10-01 ~ 2024-10-15 사이 영업일 목록
+bizseq("2024-10-01", "2024-10-15", "KOR")
+#> "2024-10-01" "2024-10-02" "2024-10-04" "2024-10-07" ...
+```
+
+```{r}
+library(readxl)
+
+donor_daily_raw_h <- read.csv("/Users/maeg/Downloads/Thesis_Materials/Thesis_can/raw/donor_raw.csv")
+
+range(donor_daily_raw_h$SUM_YRMTHDAT)
+
+```
+```{}
+asdf <- read.csv("/Users/maeg/Downloads/Thesis_Materials/daily_raw_donors_time.csv")
+
+range(asdf$week)
+```
+
+
+```{r}
+best_cz <- read_excel("/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/info/true_info.xls") %>% filter(!CZN_CD %in% "NA")
+best_cz
+```
+
+
+
+```{r}
+library(dplyr)
+
+donor_best_cz <- donor_daily_raw_h %>%
+  filter(CZN_CD %in% best_cz$CZN_CD)
+
+# 확인
+donor_best_cz %>% 
+  distinct(CZN_CD) %>% 
+  nrow()   # 121
+```
+
+
+#hour filtering
+
+```{r}
+
+
+donor_best_filtered <- donor_best_cz %>%
+  mutate(
+    date    = as.Date(as.character(SUM_YRMTHDAT), "%Y%m%d"),
+    hour    = SUM_HR,
+    weekday = lubridate::wday(date, label = TRUE, abbr = TRUE)
+  ) %>%
+  filter(
+    !date %in% kor_holidays,
+    date >= as.Date("2023-02-01"),
+    date <= as.Date("2025-03-31"),
+    weekday %in% c("Mon","Tue","Wed","Thu","Fri"),
+    (hour >= 6  & hour <= 10) |
+    (hour >= 17 & hour <= 21))
+
+# 확인
+donor_best_filtered %>%
+  summarise(
+    min_date = min(date),
+    max_date = max(date),
+    n_obs    = n()
+  )
+
+donor_best_filtered %>% filter(date == "2024-11-27")
+```
+
+
+
+
+```{r}
+
+
+# 1) traffic·speed_value 에 -1,0 → NA 변환 (필수)
+donor_checked <- donor_best_filtered %>%
+  mutate(
+    traffic     = na_if(TRFFCVLM, -1),
+    speed_value = na_if(SPD_AVG,    0)
+  ) %>% select(-X) %>%
+  left_join(
+    best_cz %>% select(CZN_CD, routeNM),
+    by = "CZN_CD"
+  )
+```
+
+
+
+
+```{r}
+# ── 시간별 극단치: ± 4.5 × MAD 기준 ───────────────────────────────
+library(dplyr)
+
+# 1) 구간별 중앙값·MAD 계산 (MAD는 1.4826 보정 포함)
+hourly_stats_raw <- donor_checked %>%
+  group_by(CZN_CD, routeNM) %>%
+  summarise(
+    med_raw = median(traffic, na.rm = TRUE),
+    mad_raw = mad(traffic,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2) 절대 편차 계산 → 4.5×MAD 초과 행만 극단치로 지정
+raw_outliers <- donor_checked %>%
+  left_join(hourly_stats_raw, by = c("CZN_CD","routeNM")) %>%
+  mutate(abs_dev = abs(traffic - med_raw)) %>%
+  filter(abs_dev > 3 * mad_raw) %>%                 # ★ ±4.5 MAD
+  select(CZN_CD, routeNM, date, hour, traffic, abs_dev)
+
+
+keep_days <- raw_outliers %>%
+  # 1) 날짜 순 정렬
+  arrange(CZN_CD, routeNM, date) %>%
+  
+  # 2) 그룹별로 연속일 판단
+  group_by(CZN_CD, routeNM) %>%
+  mutate(
+    grp = cumsum(
+      # lag(date)가 오늘-1일이 아니면 새 그룹
+      date != lag(date, default = first(date)) + days(1)
+    )
+  ) %>%
+  
+  # 3) 각 run의 길이(일수)가 20일 이상인 것만 필터
+  group_by(CZN_CD, routeNM, grp) %>%
+  filter(n() >= 20) %>%
+  
+  # 4) 최종적으로 중복 제거
+  ungroup() %>%
+  distinct(CZN_CD, routeNM, date)
+
+raw_outliers_spike <- raw_outliers %>%
+  anti_join(keep_days, by = c("CZN_CD","routeNM","date"))
+            # ^^^^^^^  ←  semi_join → anti_join 으로 뒤집기
+
+raw_outliers_spike
+
+```
+
+#이상치 있는 행 traffic NA로 만들기. 
+
+```{r}
+donor_checked
+```
+
+
+```{r}
+# — 사전 준비 — 
+all_dates  <- donor_checked %>% distinct(date)     %>% pull(date)
+peak_hours <- c(6:10, 17:21)
+
+# roads_keep 기준으로 best_cz에서 메타데이터 추출
+# CZN_CD 가 NA 인 행 제거 + roads_keep 적용
+roads_info <- best_cz %>% 
+  filter(!is.na(CZN_CD)) %>%          # ① 결측 CZN_CD 행 제거
+  distinct(CZN_CD, routeNM, road, region)
+
+# — 풀 그리드 생성 — 
+full_grid <- expand_grid(
+  roads_info,                                       # CZN_CD, routeNM, road, region
+  date   = all_dates,
+  hour   = peak_hours
+)
+
+# — 관측치(NA 처리만 한 donor_checked_clean)와 조인 — 
+donor_full_keep <- full_grid %>%
+  left_join(
+    donor_checked_clean2,                                  # ② donor_checked_clean 사용
+    by = c("CZN_CD","date","hour", "routeNM")
+  )
+```
+
+
+
+```{r}
+
+# 3) 도로별·날짜별 “값 결측” 확인
+na_map_road <- donor_full_keep %>%
+  group_by(CZN_CD, date, routeNM) %>%           # ← unit_name 추가
+  summarise(
+    n_na_traffic = sum(is.na(traffic)),
+    n_na_speed   = sum(is.na(speed_value)),
+    .groups      = "drop"
+  ) %>%
+  filter(n_na_traffic > 0 | n_na_speed > 0)
+
+# 결과 보기
+na_map_road
+
+```
+
+
+```{r}
+
+# 하루 1시간(=1 hour) 초과 결측일 플래그
+threshold_hours <- 1
+
+# 1) 하루별 결측 시간 수 집계 & 플래그 생성
+daily_flags <- donor_full_keep %>%
+  group_by(CZN_CD, routeNM, date) %>%
+  summarise(
+    n_missing_hours = sum(is.na(traffic)),
+    bad_day_1hr     = n_missing_hours > threshold_hours,
+    .groups         = "drop"
+  )
+
+# 2) 원본 데이터에 플래그 붙이기
+donor_flagged <- donor_full_keep %>%
+  left_join(
+    daily_flags %>% select(CZN_CD, routeNM, date, bad_day_1hr),
+    by = c("CZN_CD","routeNM","date")
+  )%>% 
+  mutate(week_start = floor_date(date, unit="week", week_start=1))
+
+# 확인
+daily_flags %>% filter(bad_day_1hr)
+summary(donor_flagged$bad_day_1hr)
+
+```
+
+```{r}
+
+
+# 주별 bad_day_1hr 집계 + 비율 계산
+weekly_flags <- daily_flags %>%                       # ← 일 단위 플래그 테이블 사용
+  mutate(week_start = floor_date(date, "week", week_start = 1)) %>%
+  group_by(CZN_CD, routeNM, week_start) %>%
+  summarise(
+    n_bad_days = sum(bad_day_1hr),    # 이제 최대 5
+    n_days     = n(),                 # 주중 관측일수 (월~금) = 5
+    bad_week   = n_bad_days > 0,      # 하루라도 문제가 있으면 TRUE
+    bad_rate   = n_bad_days / n_days, # 비율 (0~1)
+    .groups    = "drop"
+  )
+
+# 확인
+weekly_flags %>% arrange(desc(n_bad_days)) %>% head()
+
+# 결과 예시 확인
+head(weekly_flags)
+
+# 3) 필요 시 이 플래그를 원본에 다시 조인
+donor_flagged_with_bad_week <- donor_flagged %>%
+  mutate(week_start = floor_date(date, "week", week_start = 1)) %>%
+  left_join(weekly_flags %>% select(CZN_CD, routeNM, week_start, bad_week),
+            by = c("CZN_CD","routeNM","week_start"))
+
+# 확인
+weekly_flags %>% filter(bad_week)
+summary(donor_flagged_with_bad_week$bad_week)
+```
+
+```{r}
+
+
+route_weekly_missing <- weekly_flags %>%      # ← 시간단위 donor_flagged 대신 주단위 weekly_flags 사용
+  group_by(CZN_CD, routeNM) %>%
+  summarise(
+    total_weeks   = n_distinct(week_start),   # 고유 주 수 (112)
+    missing_weeks = sum(bad_week),            # bad_week TRUE인 주
+    missing_rate  = missing_weeks / total_weeks * 100,
+    .groups       = "drop"
+  ) %>%
+  arrange(desc(missing_rate))
+
+# 결과 확인
+route_weekly_missing
+```
+
+
+
+```{r}
+library(slider)
+# ── 0) 전제: donor_checked, best_cz, route_weekly_missing, kor_holidays 등 이미 존재 ──
+
+# 1) roads_keep 만들기: missing_rate < 15 % 구간만 남김
+roads_keep <- route_weekly_missing %>%
+  filter(missing_rate < 15) %>%          # 15 % 미만만 채택
+  pull(CZN_CD) %>% unique()
+
+# 2) roads_info (결측 CZN_CD 제거 + roads_keep 적용)
+roads_info <- best_cz %>%
+  filter(!is.na(CZN_CD)) %>%             # 결측 CZN_CD 제거
+  filter(CZN_CD %in% roads_keep) %>%     # valid 구간만
+  distinct(CZN_CD, routeNM, road, region)
+
+donor_second_junks <- donor_checked_clean2 %>%
+  filter(CZN_CD %in% roads_keep) #### 이상치 낮은 도로만
+
+
+# 3) ±4.5×MAD 극단치 계산 후 4주 연속 여부로 필터
+## 3-1) MAD 통계
+hourly_stats <- donor_second_junks %>%
+  filter(CZN_CD %in% roads_keep) %>%     # 미리 valid 구간만
+  group_by(CZN_CD, routeNM) %>%
+  summarise(
+    med_raw = median(traffic, na.rm = TRUE),
+    mad_raw = mad(traffic,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 3-2) 3×MAD 초과 outlier 행들
+raw_outliers <- donor_checked_clean2 %>%
+    filter(CZN_CD %in% roads_keep) %>% 
+  semi_join(roads_info, by = c("CZN_CD","routeNM")) %>%   # 동일 필터
+  left_join(hourly_stats, by = c("CZN_CD","routeNM")) %>%
+  mutate(abs_dev = abs(traffic - med_raw)) %>%
+  filter(abs_dev > 3 * mad_raw) %>%                    # ★ ±4.5 MAD
+  select(CZN_CD, routeNM, date, hour)
+
+## 3-3) 4주 이상 연속 outlier만 keep
+library(dplyr)
+library(lubridate)
+
+keep_days <- raw_outliers %>%
+  # 1) 날짜 순 정렬
+  arrange(CZN_CD, routeNM, date) %>%
+  
+  # 2) 그룹별로 연속일 판단
+  group_by(CZN_CD, routeNM) %>%
+  mutate(
+    grp = cumsum(
+      # lag(date)가 오늘-1일이 아니면 새 그룹
+      date != lag(date, default = first(date)) + days(1)
+    )
+  ) %>%
+  
+  # 3) 각 run의 길이(일수)가 20일 이상인 것만 필터
+  group_by(CZN_CD, routeNM, grp) %>%
+  filter(n() >= 20) %>%
+  
+  # 4) 최종적으로 중복 제거
+  ungroup() %>%
+  distinct(CZN_CD, routeNM, date)
+
+raw_outliers_spike <- raw_outliers %>%
+  anti_join(keep_days, by = c("CZN_CD","routeNM","date"))
+            # ^^^^^^^  ←  semi_join → anti_join 으로 뒤집기
+
+```
+
+```{r}
+donor_checked_without_mad <- donor_checked_clean2 %>% 
+  # 스파이크: drop = TRUE          ▼
+  left_join(raw_outliers_spike %>%
+              mutate(drop = TRUE),
+            by = c("CZN_CD","routeNM","date","hour")) %>%
+  
+  # NA → FALSE                     ▼
+  mutate(drop    = coalesce(drop, FALSE),
+         traffic = if_else(drop, NA_real_, traffic))
+```
+
+
+```{r}
+
+library(slider)
+
+#### ① hour_means ─ date 열 없애기  (rolling 90 일 중앙값)
+hour_means <- donor_checked_without_mad |>
+  filter(!is.na(traffic)) |>
+  arrange(CZN_CD, routeNM, hour, date) |>
+  group_by(CZN_CD, routeNM, hour, date) |>
+  summarise(mu_h = slide_dbl(traffic, median,
+                             na.rm = TRUE,
+                             .before = 60, .after = 0),
+            .groups = "drop")            # ← date 열 없음
+```
+
+```{r}
+# 2) 날짜-hour 그리드 완성 + 이중 보간 ───────────────
+hour_grid <- donor_checked_without_mad %>% distinct(CZN_CD, routeNM, date, hour)
+
+hour_means_filled <- hour_grid %>%                             # 전체 그리드
+  left_join(hour_means, by = c("CZN_CD","routeNM","date","hour")) %>%
+  arrange(CZN_CD, routeNM, hour, date) %>%
+  group_by(CZN_CD, routeNM, hour) %>%
+  # (a) 과거 값으로 채우고
+  mutate(mu_h_fill = zoo::na.locf(mu_h, na.rm = FALSE)) %>%
+  # (b) 미래 값으로 다시 채워 가장 가까운 값 확보
+  mutate(mu_h_fill = zoo::na.locf(mu_h_fill, fromLast = TRUE, na.rm = FALSE)) %>%
+  ungroup() %>%
+  select(CZN_CD, routeNM, date, hour, mu_h = mu_h_fill)
+
+```
+
+
+
+```{r}
+
+library(dplyr)
+library(lubridate)
+library(zoo)      # na.locf()
+
+
+# 3) 결측 행만 보간 ───────────────────────────────────
+impute_rows <- donor_checked_without_mad %>%
+  filter(is.na(traffic) | is.na(speed_value)) %>%
+  left_join(daily_totals, by = c("CZN_CD","routeNM","date")) %>%
+  left_join(hour_means_filled,     # ★ 가장 가까운 μ_h
+            by = c("CZN_CD","routeNM","date","hour")) %>%
+  group_by(CZN_CD, routeNM, date) %>%
+  mutate(
+    sum_mu_obs   = sum(mu_h[!is.na(traffic)]),
+    scale_factor = if_else(sum_mu_obs == 0, 1, total / sum_mu_obs),
+    traffic      = if_else(is.na(traffic),
+                           round(mu_h * scale_factor), traffic),
+    speed_value  = if_else(is.na(speed_value),
+                           median(speed_value, na.rm = TRUE), speed_value)
+  ) %>% ungroup()
+
+# 4) 완성본 재결합 ───────────────────────────────────
+donor_imputed <- donor_checked_without_mad %>%
+  filter(!(is.na(traffic) | is.na(speed_value))) %>%   # 이미 완전한 행
+  bind_rows(impute_rows) %>%
+  arrange(CZN_CD, routeNM, date, hour)
+
+## ── 검증 예시 ─────────────────────────────────────────────
+# ① hour별 값이 서로 다른지
+donor_imputed |>
+  filter(CZN_CD == "0010CZE035", date == as.Date("2024-06-07")) |>
+  arrange(hour) |>
+  select(hour, traffic)
+
+```
+
+```{r}
+test_rows <- donor_imputed %>%
+  semi_join(outlier_keys,
+            by = c("CZN_CD","routeNM","date","hour"))
+
+cat("스파이크 행 수:", nrow(test_rows), "\n")
+winso_ok <- all(test_rows$traffic == round(test_rows$traffic) &   # 정수
+                test_rows$traffic > 0)                            # 0 이상
+
+if (winso_ok) {
+  cat("✅ 단발 스파이크가 Winsorize 값으로 채워졌습니다.\n")
+} else {
+  cat("❗ Winsorize 되지 않은 스파이크가 남아 있습니다.\n")
+  print(test_rows %>% select(CZN_CD, routeNM, date, hour, traffic))
+}
+
+nopo <- donor_imputed %>% filter(routeNM == "노포JC-양산JC" & date > "2024-05-20")
+```
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+# ── 1. 일별 합계·중앙값·MAD 계산 ──────────────────────────────
+daily_sum <- donor_imputed %>%
+  group_by(CZN_CD, routeNM, date) %>%
+  summarise(
+    peak_traffic = sum(traffic, na.rm = TRUE),
+    med_speed = mean(speed_value, na.rm=TRUE),
+    .groups      = "drop"
+  )
+
+```
+
+
+```{r}
+daily_stats <- daily_sum %>%
+  group_by(CZN_CD, routeNM) %>%
+  summarise(
+    med_daily = median(peak_traffic, na.rm = TRUE),
+    mad_daily = mad(peak_traffic,   na.rm = TRUE),
+    .groups   = "drop"
+  )
+
+# ── 2. ±4.5 × MAD 초과 일별 극단치 식별 ───────────────────────
+daily_outliers <- daily_sum %>%
+  left_join(daily_stats, by = c("CZN_CD","routeNM")) %>%
+  mutate(abs_dev = abs(peak_traffic - med_daily)) %>%
+  filter(abs_dev > 4.5 * mad_daily) %>%     # ★ 일별 기준
+  arrange(desc(abs_dev))
+
+# ── 3. 결과 요약 & 상위 사례 확인 ─────────────────────────────
+cat("⚠️  일별 극단치:", nrow(daily_outliers), "건\n")
+print(head(daily_outliers, 20))
+```
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+# daily_sum 에 들어 있는 필드 예:
+# CZN_CD | routeNM | date | peak_traffic | med_speed …
+
+weekly_sum <- daily_sum %>%
+  mutate(week_start = floor_date(date, unit = "week", week_start = 1)) %>%  # ISO-주(월요일)
+  group_by(CZN_CD, routeNM, week_start) %>%
+  summarise(
+    week_med_traffic = median(peak_traffic, na.rm = TRUE),  # 주간 중앙값
+    week_med_speed   = median(med_speed,    na.rm = TRUE),  # (선택) 속도 중앙값
+    n_valid_days     = n(),                                 # 그 주에 남은 일수
+    .groups          = "drop"
+  ) %>%
+  filter(n_valid_days >= 4)                                 # 필요하면 “4 일 이상” 규칙
+
+# 결과 확인
+head(weekly_sum)
+```
+
+```{r}
+library(dplyr)
+library(lubridate)
+# ── 2️⃣ 노선별 주간 중앙값·MAD 산출 ──────────────────────────
+weekly_stats <- weekly_sum %>% 
+  group_by(CZN_CD, routeNM) %>% 
+  summarise(
+    med_week = median(week_med_traffic, na.rm = TRUE),
+    mad_week = mad(week_med_traffic,    na.rm = TRUE),       # 1.4826 보정 포함
+    .groups  = "drop"
+  )
+
+# ── 3️⃣ ± 4.5 × MAD 컷으로 극단치 플래그 ───────────────────
+weekly_outliers <- weekly_sum %>% 
+  left_join(weekly_stats, by = c("CZN_CD","routeNM")) %>% 
+  mutate(
+    abs_dev    = abs(week_med_traffic - med_week),
+    is_outlier = abs_dev > 3 * mad_week                 # ★ 4.5 × MAD
+  ) %>% 
+  filter(is_outlier) %>% 
+  arrange(desc(abs_dev))
+
+# ── 4️⃣ 결과 요약 ───────────────────────────────────────────
+cat("⚠️  주간 극단치(±4.5×MAD):", nrow(weekly_outliers), "건\n")
+print(head(weekly_outliers,
+           select = c(CZN_CD, routeNM, week_start, week_med_traffic, abs_dev)))
+```
+
+
+
+```{r}
+## ── ① “주간 극단치” table → 4 주 연속(run) 계산 ──────────────────
+outlier_weeks <- weekly_outliers %>%          # (is_outlier == TRUE 만 남은 상태)
+  select(CZN_CD, routeNM, week_start) %>% 
+  arrange(CZN_CD, routeNM, week_start) %>% 
+  group_by(CZN_CD, routeNM) %>% 
+  mutate(
+    is_consec = week_start == lag(week_start, default = first(week_start)) + 7,
+    grp       = cumsum(!is_consec)
+  ) %>% 
+  ungroup()
+
+## ── ② 4 주 이상 지속된 run만 keep ─────────────────────────────────
+keep_weeks <- outlier_weeks %>% 
+  group_by(CZN_CD, routeNM, grp) %>% 
+  filter(n() >= 4) %>%                       # ★ 4 주 이상
+  ungroup() %>% 
+  distinct(CZN_CD, routeNM, week_start)
+
+## ── ③ “단발(≤3 주) 스파이크” 주 추출 ────────────────────────────
+spike_weeks <- outlier_weeks %>% 
+  anti_join(keep_weeks, by = c("CZN_CD","routeNM","week_start"))
+
+## ── ④ weekly_sum 에서 스파이크 주는 NA 로 두고(=제외), 이후 보간 ─
+weekly_sum_clean <- weekly_sum %>% 
+  left_join(spike_weeks %>% mutate(drop = TRUE),
+            by = c("CZN_CD","routeNM","week_start")) %>% 
+  mutate(
+    week_med_traffic = if_else(!is.na(drop), NA_real_, week_med_traffic)
+  ) %>% 
+  select(-drop)
+
+```
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(slider)
+library(zoo)       # na.locf()
+
+# ── 0) 전제 ──────────────────────────────────────────────────────────────
+# weekly_sum_clean : week_start · week_med_traffic(NA 포함) · n_valid_days
+# roads_keep       : 결측률 15 % 미만 CZN_CD 벡터
+# best_cz          : 메타데이터
+
+# ── 1️⃣  주-그리드(모든 노선 × 모든 주) 만들기 ───────────────────────────
+all_weeks <- seq.Date(from = as.Date("2023-01-30"),   # 첫 월요일
+                      to   = as.Date("2025-03-24"),   # 마지막 월요일
+                      by   = "week")
+
+week_grid <- expand.grid(
+  CZN_CD     = roads_keep,
+  week_start = all_weeks,
+  KEEP.OUT.ATTRS = FALSE
+) |>
+  left_join(best_cz |>                 # routeNM 달아주기
+              select(CZN_CD, routeNM) |> distinct(),
+            by = "CZN_CD")
+
+# ── 2️⃣  결측 주를 포함해 정렬하고 rolling 전형값 계산 ──────────────────
+weekly_full <- week_grid |>
+  left_join(weekly_sum_clean,      # week_med_traffic(NA) 들어옴
+            by = c("CZN_CD","routeNM","week_start")) |>
+  arrange(CZN_CD, routeNM, week_start) |>
+  group_by(CZN_CD, routeNM) |>
+  mutate(
+    roll_med = slide_dbl(week_med_traffic,      # 8-주 rolling 중앙값
+                         .f        = median,
+                         na.rm     = TRUE,
+                         .before   = 7,  # 과거 7 주 + 현재 = 8 주
+                         .after    = 0),
+    # 앞→뒤→앞 LOCF(가장 가까운 전형값 확보)
+    roll_med = zoo::na.locf(roll_med,  na.rm = FALSE),
+    roll_med = zoo::na.locf(roll_med,  fromLast = TRUE, na.rm = FALSE)
+  ) |>
+  ungroup()
+
+# ── 3️⃣  **NA 주**만 전형값으로 대체 ───────────────────────────────────
+weekly_imputed <- weekly_full |>
+  mutate(
+    week_med_traffic =
+      if_else(is.na(week_med_traffic), round(roll_med), week_med_traffic)
+  ) |>
+  select(CZN_CD, routeNM, week_start,
+         week_med_traffic, n_valid_days)
+
+# ── 4️⃣  검증: 아직도 NA 가 있는지 확인 ───────────────────────────────
+stopifnot(sum(is.na(weekly_imputed$week_med_traffic)) == 0)
+```
+
+
+```{r}
+# -------------------------------------------------
+# 0) 준비
+# -------------------------------------------------
+library(dplyr)
+library(plotly)
+
+# ▸ (선택) 시각화 대상 노선만 고르기 ― 예: 부산권 4개 구간
+
+viz_df <- weekly_imputed |>                     # (앞서 만든 주차별 데이터)
+  arrange(routeNM, week_start)
+
+# -------------------------------------------------
+# 1) plotly 라인 차트
+# -------------------------------------------------
+plt <- plot_ly()
+
+for(r in unique(viz_df$routeNM)) {
+  seg <- viz_df |> filter(routeNM == r)
+
+  plt <- plt |>
+    add_lines(data   = seg,
+              x      = ~week_start,
+              y      = ~week_med_traffic,
+              name   = r,
+              hovertemplate = paste(
+                "<b>%{text}</b><br>",
+                "주차 시작일: %{x|%Y-%m-%d}<br>",
+                "주간 중앙 교통량: %{y:,.0f}<extra></extra>"
+              ),
+              text   = seg$routeNM)
+}
+
+plt <- plt |>
+  layout(title  = "노선별 주간(월~금) 피크-시간 교통량 중앙값",
+         xaxis  = list(title = "주차 시작 (월요일)"),
+         yaxis  = list(title = "주간 중앙 교통량 (대수)",
+                       separatethousands = TRUE),
+         hovermode = "x unified")
+
+plt   # ⬅️  Viewer 창 또는 브라우저에서 확인
+```
+
+
+
+```{r}
+
+library(lubridate)
+
+# 1) 전체 기간의 주(week_start) 목록 만들기
+all_weeks <- seq.Date(
+  from = floor_date(as.Date("2023-02-01"),   unit = "week", week_start = 1),
+  to   = floor_date(as.Date("2025-03-28"),   unit = "week", week_start = 1),
+  by   = "week"
+)
+
+# 2) 도로·구간 목록
+roads_info <- daily_summary_clean %>%
+  distinct(CZN_CD, routeNM)
+
+# 3) full grid: 도로×구간×주 조합
+full_road_weeks <- expand_grid(
+  roads_info,
+  week_start = all_weeks
+)
+
+# 4) 기존 주별 요약(weekly_summary)과 합치기
+weekly_summary <- daily_summary_clean %>%
+  mutate(week_start = floor_date(date, "week", week_start = 1)) %>%
+  group_by(CZN_CD, routeNM, week_start) %>%
+  summarise(
+    n_valid_days = n(),
+    .groups      = "drop"
+  )
+
+weekly_complete <- full_road_weeks %>%
+  left_join(weekly_summary, by = c("CZN_CD","routeNM","week_start")) %>%
+  replace_na(list(n_valid_days = 0))
+
+# 5) 최종 valid rate 계산
+route_weekly_valid_rate <- weekly_complete %>%
+  group_by(CZN_CD, routeNM) %>%
+  summarise(
+    total_weeks = n(),                          # 항상 length(all_weeks)=112
+    good_weeks  = sum(n_valid_days >= 4),       # 유효일수 ≥4인 주
+    valid_rate  = good_weeks / total_weeks * 100,
+    .groups     = "drop"
+  ) %>%
+  arrange(desc(valid_rate))
+
+final_roads_donor <- route_weekly_valid_rate %>% filter(valid_rate > 90) %>% pull(CZN_CD)
+
+```
+
+
+```{r}
+library(dplyr)
+
+# 2) (선택) 메타데이터도 같이 가져오고 싶다면
+ donor_final <- donor_imputed_clean %>%
+   semi_join(best_cz %>% select(CZN_CD, routeNM, road, region) %>%
+               distinct() %>%
+               filter(CZN_CD %in% final_roads_donor),
+             by = "CZN_CD")
+
+# 3) 일별 요약 다시
+daily_summary_final <- donor_final %>%
+  group_by(CZN_CD, routeNM, date) %>%
+  summarise(
+    peak_traffic = sum(traffic),
+    med_speed    = median(speed_value, na.rm = TRUE),
+    .groups      = "drop"
+  )
+
+# 4) 주별 요약 다시
+weekly_summary_final <- daily_summary_final %>%
+  mutate(week_start = floor_date(date, "week", week_start = 1)) %>%
+  group_by(CZN_CD, routeNM, week_start) %>%
+  summarise(
+    week_med_traffic = median(peak_traffic),
+    week_med_speed   = median(med_speed),
+    n_valid_days     = n(),
+    .groups          = "drop"
+  ) %>%
+  filter(n_valid_days >= 4)
+
+# 결과 확인
+head(weekly_summary_final)
+```
+```{r}
+library(plotly)
+library(dplyr)
+
+weekly_plot <- weekly_summary_final %>%
+  filter(CZN_CD %in% final_roads_donor) %>%    # valid_rate ≥ 90% 구간만
+  plot_ly(
+    x    = ~week_start,
+    y    = ~week_med_traffic,
+    color= ~routeNM,
+    type = 'scatter',
+    mode = 'lines',
+    connectgaps = TRUE,
+    hoverinfo = 'text',
+    text = ~paste(
+      '구간: ', routeNM, '<br>',
+      '주 시작: ', week_start, '<br>',
+      '주 중앙 교통량: ', format(week_med_traffic, big.mark=','), '<br>',
+      '유효일수: ', n_valid_days
+    )
+  ) %>%
+  layout(
+    title = 'Valid Rate ≥ 90% 구간의 주간 중앙 피크 교통량',
+    xaxis = list(title = '주 시작일'),
+    yaxis = list(title = '주간 중앙 피크 교통량'),
+    legend = list(title=list(text='구간'), orientation='h', x=0, y=-0.2)
+  )
+
+weekly_plot
+```
+
+
+
+```{r}
+library(plotly)
+
+fig <- plot_ly(
+  data = weekly_stats_keep,
+  x    = ~week,
+  y    = ~week_med_traffic,
+  color= ~routeNM,
+  type = 'scatter',
+  mode = 'lines',
+  hoverinfo = 'text',
+  text = ~paste(
+    '구간: ', routeNM, '<br>',
+    '주 시작일: ', week, '<br>',
+    '주간 중앙 피크 교통량: ', format(week_med_traffic, big.mark=','), '<br>',
+    '유효일수: ', n_valid_days
+  )
+) %>%
+  layout(
+    title = '도로 구간별 주간 중앙 피크 교통량 (결측률 ≤10%, 유효일수 ≥4일)',
+    xaxis = list(title = '주 시작일'),
+    yaxis = list(title = '주간 중앙 피크 교통량'),
+    legend = list(title = list(text='구간(routeNM)'), orientation='h', x=0, y=-0.2)
+  )
+
+fig
+```
+
+
+```{r}
+# 5) 일별 집계: 하루 10개 피크시간 합계·속도 중앙값
+daily_cz <- donor_clean %>%
+  group_by(CZN_CD, date) %>%
+  summarise(
+    peak_traffic = sum(traffic, na.rm = TRUE),
+    med_speed    = median(speed_value, na.rm = TRUE),
+    .groups      = "drop"
+  ) %>%
+  # 주(ISO 주 기준 월요일) 시작일 컬럼 추가
+  mutate(week_start = floor_date(date, unit = "week", week_start = 1))
+```
+
+```{r}
+daily_cz_combined <-  daily_cz %>%
+  left_join(
+    best_cz %>%
+      select(CZN_CD, direction, road, region, routeNM) %>%
+      distinct(),
+    by = "CZN_CD") %>% filter(!road %in% "경부선")
+```
+
+```{r}
+library(plotly)
+
+fig_combined <- plot_ly(
+  data        = daily_cz_combined,
+  x           = ~week_start,
+  y           = ~peak_traffic,
+  color       = ~routeNM,        # 노선별 색 구분
+  legendgroup = ~routeNM,
+  type        = 'scatter',
+  mode        = 'lines',
+  customdata  = ~region,         # hover에 지역 정보 표시
+  hovertemplate = paste(
+    "Region: %{customdata}<br>",
+    "Route: %{legendgroup}<br>",
+    "Week Start: %{x|%Y-%m-%d}<br>",
+    "Daily Avg Traffic: %{y:,} veh"
+  )
+) %>%
+  layout(
+    title = "도로별 주별 하루 평균 교통량",
+    xaxis = list(title = "주 시작일", tickformat = "%Y-%m-%d"),
+    yaxis = list(title = "하루 평균 교통량 (대/일)"),
+    legend = list(
+      orientation = "h",      # 가로 배치
+      x           = 0.5,
+      xanchor     = "center",
+      y           = -0.2,
+      yanchor     = "top"
+    ),
+    margin = list(b = 100)    # 아래 여백 확보
+  )
+
+fig_combined
+```
+
+
+
+
+```{}
+daily_cz_filtered_no_construction <- daily_cz_combined %>%
+  # first remove your existing filters (if you want to keep them, chain them before the anti_join)
+  # e.g. %>% filter(road != "경부선", !routeNM %in% c(...)) %>%
+  
+  # now drop any rows matching a construction (routeNM, date) pair
+  anti_join(
+    outlier_and_work %>% select(routeNM, date),
+    by = c("routeNM", "date")
+  )
+```
+
+  %>%
+  filter(
+    road != "경부선", !routeNM %in% c(
+      "가락IC-서부산IC",  "기장IC-해운대IC", "목감IC-광명역IC",
+      "남고양IC-봉대산JC","봉대산JC-남고양IC", "평택고덕IC-송탄IC",
+      "북수원IC-동수원IC","판교JC-성남IC",   "성남IC-성남TG",
+      "토평IC-구리TG",    "구리TG-남양주IC", "남양주IC-구리IC",
+      "성남IC-판교JC",    "구리TG-토평IC",   "학의JC-평촌IC",
+      "평촌IC-학의JC",    "팔곡JC-매송IC",   "판암IC-비룡JC",
+      "유성IC-유성JC",    "계양IC-노오지JC", "노오지JC-인천공항TG",
+      "서운JC-계양IC",    "서인천IC-부평IC",
+      "연수JC-송도IC(송도->연수)", "남세종IC-유성JC",
+      "연수JC-송도IC(연수->송도)", "판암IC-산내JC",
+      "인천공항TG-노오지JC", "고기터널남측-서수지TG", "하산운터널남측-하산운터널북측", "일직JC-광명IC", "정남IC-화성JC", "청계TG-판교JC", "청계TG-학의JC", "퇴계원IC-별내IC", "하남IC-동서울TG", "학의JC-청계TG", "대동IC-대감JC", "대감JC-대동IC", "인천대교TG-연수JC(공항->송도)", "인천대교TG-연수JC(송도->공항)" ))
+      
+      
+      
+```{}
+read.csv("/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/construction_outliers.csv", fileEncoding = "CP949")
+```
+
+        
+!routeNM %in% c("노오지JC-인천공항TG",
+  "서운JC-계양IC",
+  "서인천IC-부평IC",
+  "인천공항TG-노오지JC",
+  "노오지JC-인천공항TG",
+  "인천대교TG-연수JC(공항->송도)",
+  "인천대교TG-연수JC(송도->공항)",
+  "인천공항TG-노오지JC",
+  "판암IC-비룡JC",
+  "구리TG-남양주IC",
+  "구리TG-토평IC",
+  "남고양IC-봉대산JC",
+  "동서울TG-하남JC",
+  "봉대산JC-남고양IC",
+  "북수원IC-동수원IC",
+  "북오산IC-동탄JC",
+  "북오산IC-서오산JC",
+  "서오산JC-서오산TG",
+  "서오산TG-서오산JC",
+  "서용인IC-서용인JC",
+  "서하남IC-서하남JC",
+  "성남IC-성남TG",
+  "성남IC-판교JC",
+  "성남TG-송파IC",
+  "유성IC-유성JC",
+  "대저JC-북부산TG",
+  "판암IC-산내JC",
+  "토평IC-구리TG",
+  "판교JC-성남IC",
+    "산본IC-평촌IC",
+  "정남IC-화성JC",
+  "일직JC-광명IC",
+  "안현JC-도리JC",
+  "동시흥JC-남군포IC",
+  "팔곡JC-매송IC",
+  "청계TG-판교JC")) 
+
+
+```{r}
+
+daily_cz_filtered <- daily_cz_combined   %>%
+  filter(!routeNM %in% c("구리TG-토평IC", "남고양IC-봉대산JC", "노오지JC-인천공항TG" , "서운JC-계양IC"    , "서인천IC-부평IC" , "성남IC-판교JC"  , "인천공항TG-노오지JC"  ,"정남IC-화성JC"  ,  "토평IC-구리TG"   ,  "판암IC-비룡JC" , "봉대산JC-남고양IC", "판교JC-성남IC"))%>% 
+ 
+#    anti_join(
+#    construction_days %>% select(routeNM, date),
+#    by = c("routeNM", "date")
+#  ) %>%
+  filter(  !(
+      routeNM == "해운대IC-기장JC" &
+      date %in%  seq(as.Date("2024-12-31"), as.Date("2025-01-16"), by = "day"))
+    )%>% 
+      filter(
+    !(
+      road == "경부선" &
+      date %in%  seq(as.Date("2024-12-31"), as.Date("2025-01-16"), by = "day"))
+    )%>%
+    filter(
+    !(
+      routeNM == "남청라JC-시점" &
+      date %in%  as.Date("2023-10-25") )
+    )%>% 
+    filter(
+    !(
+      routeNM == "남청라JC-북청라IC" &
+      date %in%  as.Date("2023-10-25") )
+    ) %>% 
+    filter(
+    !(
+      routeNM == "동서울TG-하남IC" &
+      date %in%  as.Date("2024-11-28") )
+    )  %>% 
+    filter(
+    !(
+      routeNM == "서오산JC-서오산TG" &
+      date %in%  seq(as.Date("2025-03-04"), as.Date("2025-03-10"), by = "day"))
+    ) %>% 
+    filter(
+    !(
+      routeNM == "서오산TG-서오산JC" &
+      date %in%  seq(as.Date("2025-03-04"), as.Date("2025-03-10"), by = "day"))
+    )%>% 
+    filter(
+    !(
+      routeNM == "연수JC-송도IC(연수->송도)" &
+      date %in%  seq(as.Date("2023-12-22"), as.Date("2024-01-19"), by = "day"))
+    )%>% 
+    filter(
+    !(
+      routeNM == "연수JC-송도IC(송도->연수)" &
+      date %in%  seq(as.Date("2023-12-22"), as.Date("2024-01-19"), by = "day"))
+    )%>% 
+  
+    filter(
+    !(
+      routeNM == "송산마도IC-남안산JC" &
+      date %in%  seq(as.Date("2024-09-02"), as.Date("2024-09-04"), by = "day"))
+    )
+
+
+```
+
+
+
+
+```{r}
+library(dplyr)
+library(plotly)
+
+# 1) region 목록
+regions <- unique(daily_cz_filtered$region)
+
+# 2) region별로 Plotly 객체 생성
+plots <- lapply(regions, function(reg) {
+  df_sub <- daily_cz_filtered %>% filter(region == reg)
+  
+  fig <- plot_ly(
+    data        = df_sub,
+    x           = ~date,
+    y           = ~day_sum,
+    color       = ~routeNM,        # 선 색은 routeNM
+    legendgroup = ~routeNM,        # 그룹화도 routeNM
+    text        = ~road,           # hover 시 보여줄 road
+    type        = 'scatter',
+    mode        = 'lines',
+    hovertemplate = paste0(
+      "<b>Road:</b> %{text}<br>",
+      "<b>Route:</b> %{legendgroup}<br>",
+      "Date: %{x|%Y-%m-%d}<br>",
+      "Traffic: %{y:,} vehicles"
+    )
+  ) %>%
+    layout(
+      title = paste0("Region: ", reg, " 일별 총합 교통량"),
+      xaxis = list(title = "Date", tickformat = "%Y-%m-%d"),
+      yaxis = list(title = "Traffic (vehicles/day)"),
+      legend = list(title = list(text = "<b>RouteNM</b>"))
+    )
+  
+  return(fig)
+})
+
+# 3) plots 리스트에서 보고 싶은 region의 index를 골라서 출력
+# 예) 첫 번째(=regions[1])와 두 번째(=regions[2])만 보고 싶다면:
+plots[[1]]
+
+
+# 또는 for문을 써서 콘솔에 순서대로 출력
+for (i in seq_along(regions)) {
+  message("▶ Showing plot for region: ", regions[i])
+  print(plots[[i]])
+  # 만약 RMarkdown 문서라면 각 fig를 chunk마다 출력하거나, 
+  # shiny/patchwork 등을 이용해 탭별로 띄울 수 있습니다.
+}
+
+```
+
+
+```{r}
+# ── 2) 방향별 주별 중앙값 계산 ─────────────────────────────────────────────
+# NA 있어도 무시
+weekly_dir <- daily_cz_filtered %>%
+  mutate(week = floor_date(date, unit = "week", week_start = 1)) %>%
+  group_by(
+    CZN_CD, direction, routeNM, region, road,
+    week
+  ) %>%
+  summarise(
+    med_traffic  = median(day_sum,       na.rm = TRUE),
+    med_speed    = median(day_med_speed, na.rm = TRUE),
+    .groups       = "drop"
+  )
+```
+
+
+
+#plot
+```{r}
+library(dplyr)
+library(plotly)
+
+# 1) region 목록
+regions <- unique(weekly_dir$region)
+
+# 2) region별로 Plotly 객체 생성
+plots <- lapply(regions, function(reg) {
+  df_sub <- weekly_dir %>% 
+    filter(region == reg)
+  
+  fig <- plot_ly(
+    data     = df_sub,
+    x        = ~week,
+    y        = ~med_traffic,
+    color       = ~routeNM,        # 선 색은 routeNM
+    legendgroup = ~routeNM,        # 그룹화도 routeNM
+    text        = ~road,           # hover 시 보여줄 road
+    type     = 'scatter',
+    mode     = 'lines',
+    hovertemplate = paste0(
+      "<b>Road:</b> %{text}<br>",
+      "<b>Route:</b> %{legendgroup}<br>",
+      "Date: %{x|%Y-%m-%d}<br>",
+      "Traffic: %{y:,} vehicles"
+    )
+  ) %>%
+    layout(
+      title = paste0("Region: ", reg, " 주별 출퇴근 중앙값 교통량TRUE"),
+      xaxis = list(title = "Week", tickformat = "%Y-%m-%d"),
+      yaxis = list(title = "Traffic (vehicles/day)"),
+      legend = list(title = list(text = "<b>Road Name</b>"))
+    )
+  
+  return(fig)
+})
+
+# 3) plots 리스트에서 보고 싶은 region의 index를 골라서 출력
+# 예) 첫 번째(=regions[1])와 두 번째(=regions[2])만 보고 싶다면:
+plots[[1]]
+
+# 또는 for문을 써서 콘솔에 순서대로 출력
+for (i in seq_along(regions)) {
+  message("▶ Showing plot for region: ", regions[i])
+  print(plots[[i]])
+  # 만약 RMarkdown 문서라면 각 fig를 chunk마다 출력하거나, 
+  # shiny/patchwork 등을 이용해 탭별로 띄울 수 있습니다.
+}
+```
+
+
+```{r}
+library(tidyr)
+# 1) 모든 주(week)를 채워서 NA인 행(mark missing)을 만들고
+weekly_complete <- weekly_dir %>%
+  group_by(routeNM, region, direction, CZN_CD) %>%
+  complete(
+    week = seq(min(week), max(week), by = "1 week")
+  ) %>%
+  ungroup()
+
+# 2) 누락 여부 컬럼 추가
+weekly_flagged <- weekly_complete %>%
+  mutate(
+    is_missing = is.na(med_traffic)
+  )
+
+# 3) 노선별로 요약: 누락 주 수, 전체 주 수, 누락 비율 계산
+missing_rate <- weekly_flagged %>%
+  group_by(routeNM) %>%
+  summarise(
+    n_missing    = sum(is_missing),
+    n_total      = n(),
+    missing_rate = n_missing / n_total
+  ) %>%
+  arrange(desc(missing_rate))
+
+# 결과 확인
+missing_high_routeNM <- missing_rate %>% filter(missing_rate > 0.15) %>% pull(routeNM)
+
+```
+
+
+```{r}
+
+weekly_dir_filled <- weekly_dir %>% 
+  filter(!routeNM %in% missing_high_routeNM) %>%
+  group_by(routeNM, region, direction, CZN_CD) %>%
+  complete(
+    week = seq(min(week), max(week), by = "1 week")
+  ) %>%
+  arrange(routeNM, week) %>%
+  mutate(
+    med_traffic_interp = na.approx(
+      med_traffic,                  # ← 첫 번째 인자: 보간할 벡터 (object)
+      x      = as.numeric(week),    # ← 두 번째 인자: 인덱스
+      na.rm  = FALSE,
+      rule   = 2
+    )
+  ) %>%
+  ungroup()
+
+```
+
+
+```{r}
+library(dplyr)
+
+weekly_outliers <- weekly_dir_filled %>%
+  group_by(routeNM) %>%
+  mutate(
+    Q1         = quantile(med_traffic_interp, 0.25, na.rm = TRUE),
+    Q3         = quantile(med_traffic_interp, 0.75, na.rm = TRUE),
+    IQR        = Q3 - Q1,
+    lower_bound = Q1 - 1.5 * IQR,
+    upper_bound = Q3 + 1.5 * IQR,
+    is_outlier  = (med_traffic_interp < lower_bound) | (med_traffic_interp > upper_bound)
+  ) %>%
+  ungroup()
+
+# 이상치가 라인별로 얼마나 있는지 비율 계산
+outlier_summary <- weekly_outliers %>%
+  group_by(routeNM) %>%
+  summarise(
+    total_weeks    = n(),
+    outlier_weeks  = sum(is_outlier, na.rm = TRUE),
+    pct_outlier    = 100 * outlier_weeks / total_weeks
+  ) %>%
+  arrange(desc(pct_outlier))
+
+# 상위 10개 노선만 보기
+outlier_summary %>% slice_head(n = 10)
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+
+# 1) week가 Date 형식인지 보장
+weekly_completed <- weekly_dir %>%
+  mutate(week = as.Date(week)) %>%
+  # routeNM, region 뿐 아니라 road, linkID, direction 까지 묶어서
+  group_by(routeNM, region, CZN_CD, direction, road) %>%
+  complete(
+    week = seq(min(week), max(week), by = "1 week")
+  ) %>%
+  ungroup()
+
+```
+
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(zoo)
+library(ggplot2)
+library(showtext)
+
+# 1) 한글 폰트
+font_add_google("Nanum Gothic", "nanum")
+showtext_auto()
+
+# 2) complete() 후 fill()로 메타 채우기 & 결측 플래그 달기
+weekly_full <- weekly_completed %>%
+  mutate(week = as.Date(week)) %>%
+  group_by(routeNM, region) %>%
+  complete(
+    week = seq(min(week), max(week), by = "1 week")
+  ) %>%
+  # ↓↓ 이 두 줄 추가 ↓↓
+  fill(CZN_CD, direction,  .direction = "down") %>%
+  fill(CZN_CD, direction,  .direction = "up") %>%
+  ungroup() %>%
+  mutate(
+    missing_speed_before   = is.na(med_speed),
+    missing_traffic_before = is.na(med_traffic)
+  ) %>%
+  arrange(routeNM, region, week) %>%
+  group_by(routeNM, region) %>%
+  mutate(
+    speed    = na.approx(med_speed,   as.numeric(week), na.rm = FALSE, rule = 2),
+    traffic  = na.approx(med_traffic, as.numeric(week), na.rm = FALSE, rule = 2),
+    missing_speed_after   = is.na(speed),
+    missing_traffic_after = is.na(traffic)
+  ) %>%
+  ungroup()
+
+# ▶ 이제 weekly_full$road 에도 NA 없이 원본 road 값이 채워집니다.
+
+# 3) 히트맵 그리는 함수: print만 하고 리턴은 invisible(NULL)
+plot_heatmap <- function(data, flag, title_suffix) {
+  for (reg in sort(unique(data$region))) {
+    df_sub <- filter(data, region == reg)
+    p <- ggplot(df_sub, aes(x = week, y = routeNM, fill = .data[[flag]])) +
+      geom_tile(color = "white", size = 0.1) +
+      scale_x_date(date_breaks = "4 weeks", date_labels = "%Y-%m-%d") +
+      scale_fill_manual(
+        values = c(`FALSE` = "#4CAF50", `TRUE` = "#F44336"),
+        labels = c(`FALSE` = "Data", `TRUE` = "Missing")
+      ) +
+      labs(
+        title = paste0("Region: ", reg, " — 주차별 결측 여부 ", title_suffix),
+        x     = "Week", y = "Road Name", fill = ""
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(
+        text        = element_text(family = "nanum"),
+        panel.grid  = element_blank(),
+        axis.text.y = element_text(size = 6),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title  = element_text(face = "bold")
+      )
+    print(p)
+  }
+  invisible()  # 마지막에 리턴값이 없도록
+}
+
+# 4) 올바른 플래그 이름으로 Before/After 그리기
+
+# 속도
+plot_heatmap(weekly_full, "missing_speed_before",   "(Speed Before)")
+plot_heatmap(weekly_full, "missing_speed_after",    "(Speed After)")
+
+# 교통량
+plot_heatmap(weekly_full, "missing_traffic_before", "(Traffic Before)")
+plot_heatmap(weekly_full, "missing_traffic_after",  "(Traffic After)")
+
+
+
+
+```
+
+
+
+
+
+
+
+```{r}
+write.csv(weekly_full, "/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/g_hourly_routeNM.csv", fileEncoding = "CP949", row.names = FALSE)
+```
+
