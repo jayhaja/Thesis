@@ -86,21 +86,23 @@ bizseq("2024-10-01", "2024-10-15", "KOR")
 
 ```{r}
 library(readxl)
+# Directory containing data files
+data_dir <- "data"
+data_path <- function(...) file.path(data_dir, ...)
 
-donor_daily_raw_h <- read.csv("/Users/maeg/Downloads/Thesis_Materials/Thesis_can/raw/donor_raw.csv")
+
+donor_daily_raw_h <- read.csv(data_path("donor_raw.csv"))
 
 range(donor_daily_raw_h$SUM_YRMTHDAT)
 
-```
 ```{}
-asdf <- read.csv("/Users/maeg/Downloads/Thesis_Materials/daily_raw_donors_time.csv")
-
+asdf <- read.csv(data_path("daily_raw_donors_time.csv"))
 range(asdf$week)
 ```
 
 
 ```{r}
-best_cz <- read_excel("/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/info/true_info.xls") %>% filter(!CZN_CD %in% "NA")
+best_cz <- read_excel(data_path("true_info.xls")) %>% filter(!CZN_CD %in% "NA")
 best_cz
 ```
 
@@ -990,7 +992,7 @@ daily_cz_filtered_no_construction <- daily_cz_combined %>%
       
       
 ```{}
-read.csv("/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/construction_outliers.csv", fileEncoding = "CP949")
+read.csv(data_path("construction_outliers.csv"), fileEncoding = "CP949")
 ```
 
         
@@ -1413,6 +1415,6 @@ plot_heatmap(weekly_full, "missing_traffic_after",  "(Traffic After)")
 
 
 ```{r}
-write.csv(weekly_full, "/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/g_hourly_routeNM.csv", fileEncoding = "CP949", row.names = FALSE)
+write.csv(weekly_full, data_path("g_hourly_routeNM.csv"), fileEncoding = "CP949", row.names = FALSE)
 ```
 
