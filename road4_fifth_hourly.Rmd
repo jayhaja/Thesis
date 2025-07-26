@@ -1,0 +1,3951 @@
+---
+title: "SCM_olympic_0"
+author: "Jiye Shin"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    self_contained: true
+---
+
+### 1. Import
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  cache    = TRUE,    # 캐시 기본 ON
+  autodep  = TRUE,    # 청크 간 의존성 자동 추적
+  echo     = TRUE,    # 코드 보이기
+  message  = FALSE,   # 메시지 숨기기
+  warning  = FALSE    # 경고 숨기기
+)
+#incheon_daily_full
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(scales)
+library(Synth)
+library(readr)
+library(showtext)
+library(future)
+library(SCtools)
+
+font_add_google("Noto Sans KR",      #* 구글 폰트 한글계열 추천
+                regular.wt = 400,    # 400 = Regular
+                bold.wt    = 700)    # 700 = Bold
+showtext_auto()                      # 📌 이 줄 이후 모든 플롯에 적용
+
+#원래 피발류 낮게 나온거. "/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/important/df_filtered_without_imputed_raw.csv"
+# 새거"/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/hourly_final_data_0723_with_seoul_without_imputed.csv"
+#/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/important/df_filtered_without_imputed_raw.csv
+# 올바른 사용 예 ― CSV 파일을 읽어 df 에 담기
+
+
+### 제대로 된 피발류 나오는거 #/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/hourly_final_data_0723_with_seoul_without_imputed.csv
+## ^바로 위에거에 영어 이름 단거 # /Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/hourly_final_data_0724_with_seoul_without_imputed_with_en.csv"
+
+##"/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/length_corrected_0725.csv" 도로 길이 넣은거
+
+### 인천 새도로 집어넣은거. 
+#/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/hourly_final_data_0725_with_seoul_without_imputed_with_en.csv
+
+#도로 더 집어넣은거 /Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/hourly_final_data_0727_with_seoul_without_imputed_with_en.csv #이걸로 올림픽대로전까지 진행함
+
+#완전 로우 /Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/hourly_final_data_0727_new_rule.csv
+
+df_raw <- read.csv("/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/hourly_final_data_0727_new_rule.csv", fileEncoding = "CP949") %>%
+  mutate(week = ymd(week))
+head(df_raw)
+
+
+
+```
+
+
+```{}
+library(readxl)
+changed_length <- read_excel("/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/info/true_info_again.xlsx")
+
+
+# 1) df_raw에서 road 값이 changed_length$road에 있는 것만 필터
+df_filtered <- df_raw %>%
+  semi_join(changed_length, by = "road") %>% select(-c(total_length_km, local_length_km))
+
+
+df_step2 <- df_filtered %>%
+  left_join(
+    changed_length %>% 
+      select(road, direction, local_length_km, total_length_km, linkID),
+    by = c("road", "direction", "linkID")) 
+```
+
+```{r}
+library(dplyr)
+
+df_step4 <- df_raw %>% 
+  group_by(linkID, routeNM) %>%
+  mutate(
+    total_length = total_length_km * 1,
+    local_length = local_length_km * 1
+  ) %>% select(-c(total_length_km, local_length_km)) %>%
+  mutate(local_share = local_length / total_length)
+
+
+
+```
+
+```{}
+# 1) 원본 보존
+df_step4 <- df_step4 %>%
+  rename(
+    origin_traffic = traffic,
+    origin_speed   = speed
+  )
+
+# 2) 표준화할 변수 목록(이미 origin_* 은 빼고 나머지만)
+cont_vars <- c(
+  "lanes.min", "lanes.max", "local_share",
+  "speed.min", "speed.max",
+  "local_length", "total_length"
+)
+
+# 3) 공변량 + traffic/speed 모두 z-score 표준화
+df_scaled_z <- df_step4 %>%
+  mutate(
+    across(all_of(cont_vars), ~ as.numeric(scale(.))),
+    traffic = as.numeric(scale(origin_traffic)),
+    speed   = as.numeric(scale(origin_speed))
+  )
+```
+
+#setting
+```{r}
+
+start_week <- ymd("2023-02-13")
+policy_date <- ymd("2024-01-27")    # 정책 시작일
+end_week   <- ymd("2025-03-31") 
+
+# 0) 로컬 구간 비중 변수 추가
+
+
+## 1) 원본 -> 기간만 잘라내기
+df_period <- df_step4 %>% 
+  # month 열이 Date 형식인지 한번 보장
+  mutate(week = as.Date(week)) %>%      
+  filter(
+    week >= start_week,
+    week <= end_week
+  )
+
+## 2) 잘라낸 뒤에 unit_name별 month_index 부여
+df_m <- df_period %>% 
+  arrange(routeNM, week) %>% 
+  group_by(routeNM) %>% 
+  mutate(week_index = row_number()) %>% 
+  ungroup() %>% 
+  mutate(unit_id = as.numeric(unit_id))
+
+df_scm <- as.data.frame(df_m)
+
+# 처리군
+
+# 1) 기본: unit_id ↔ unit_name 매핑 --------------------------
+lookup_tbl <- df_scm %>%
+  distinct(unit_id, routeNM, road, region, direction, total_length, local_length, unit_name_en, road_en) %>%       # 중복 제거 routeNM_en, road_en, 
+  arrange(unit_id)                       # 보기 좋게 정렬
+
+print(lookup_tbl)               # 모두 출력
+
+
+
+# 모든 주 벡터 생성
+weeks_all <- seq(start_week, end_week, by = "week")
+n_all  <- length(weeks_all)                #
+n_pre  <- sum(weeks_all <= policy_date)  #-1 
+n_post <- n_all - n_pre
+
+cat(sprintf("사전 %d주 · 사후 %d주 · 전체 %d주\n",
+            n_pre, n_post, n_all))
+
+
+good_preds <- c("lanes.min","local_length_km","total_length_km", "speed.max", "lanes.max", "speed.min", "local_share")
+
+good_preds_new <- c("lanes.max", "speed.max","local_share", "total_length_km")
+
+sp_list <- list(                              # traffic 11블록 + speed 1블록
+  list("traffic", 1:4,  "mean"),  list("traffic", 5:8,  "mean"),
+  list("traffic", 9:13, "mean"),  list("traffic",14:17, "mean"),
+  list("traffic",18:21, "mean"),  list("traffic",22:26, "mean"),
+  list("traffic",27:30, "mean"),  list("traffic",31:33, "mean"),
+  list("traffic",34:36, "mean"),   list("traffic",37:39, "mean"),  list("traffic",40:42, "mean"),  list("traffic",43:45, "mean"), list("traffic",46:48, "mean"),list("traffic",49:51, "mean"),
+  list("speed",    1:25, "mean"), list("speed", 26:51, "mean"))
+#     list("traffic",48:50, "mean"), list("traffic",56:63, "mean"),    list("traffic",64:70, "mean"), list("speed",   1:70, "mean"))
+  #    
+
+sp_2_all <- list(
+    ## ── traffic ───────────────────────────────
+  list("traffic",  1:2 , "mean"),
+  list("traffic",  3:4 , "mean"),
+  list("traffic",  5:6 , "mean"),
+  list("traffic",  7:8 , "mean"),
+  list("traffic",  9:10, "mean"),
+  list("traffic", 11:12, "mean"),
+  list("traffic", 13:14, "mean"),
+  list("traffic", 15:16, "mean"),
+  list("traffic", 17:18, "mean"),
+  list("traffic", 19:20, "mean"),
+  list("traffic", 21:22, "mean"),
+  list("traffic", 23:24, "mean"),
+  list("traffic", 25:26, "mean"),
+  list("traffic", 27:28, "mean"),
+  list("traffic", 29:30, "mean"),
+  list("traffic", 31:32, "mean"),
+  list("traffic", 33:34, "mean"),
+  list("traffic", 35:36, "mean"),
+    list("traffic", 37:38, "mean"),
+    list("traffic", 39:40, "mean"),
+  list("traffic", 41:42, "mean"),
+  list("traffic", 43:44, "mean"),
+  list("traffic", 45:46, "mean"),
+  list("traffic", 47:48, "mean"),
+  list("traffic",49:50, "mean"),
+  #,  list("traffic", 51:51, "mean"),
+  
+  ## ── speed ──────────────────────────────────────────────
+ list("speed",    1:25, "median"), list("speed",    26:50, "median"))
+
+
+
+sp_32 <- list(
+  list("traffic",  1:1 ,  "mean"),
+  list("traffic",  2:3 ,  "mean"),  # B02
+  list("traffic",  4:5 ,  "mean"),   # B03
+  list("traffic",  6:6 ,  "mean"),   # B04
+  list("traffic",  7:8 ,  "mean"),   # B05
+  list("traffic",  9:10,  "mean"),   # B06
+  list("traffic", 11:11,  "mean"),   # B07
+  list("traffic", 12:13,  "mean"),   # B08
+  list("traffic", 14:15,  "mean"),   # B09
+  list("traffic", 16:16,  "mean"),   # B10
+  list("traffic", 17:18,  "mean"),   # B11
+  list("traffic", 19:20,  "mean"),   # B12
+  list("traffic", 21:21,  "mean"),   # B13
+  list("traffic", 22:23,  "mean"),   # B14
+  list("traffic", 24:25,  "mean"),   # B15
+  list("traffic", 26:26,  "mean"),   # B16
+  list("traffic", 27:28,  "mean"),   # B17
+  list("traffic", 29:30,  "mean"),   # B18
+  list("traffic", 31:31,  "mean"),   # B19
+  list("traffic", 32:33,  "mean"),   # B20
+  list("traffic", 34:35,  "mean"),   # B21
+  list("traffic", 36:36,  "mean"),   # B22
+  list("traffic", 37:38,  "mean"),   # B23
+  list("traffic", 39:40,  "mean"),   # B24
+  list("traffic", 41:41,  "mean"),   # B25
+  list("traffic", 42:43,  "mean"),   # B26
+  list("traffic", 44:45,  "mean"),   # B27
+  list("traffic", 46:46,  "mean"),   # B28
+  list("traffic", 47:48,  "mean"),   # B29
+  list("traffic", 49:50,  "mean"),   # B30
+  list("speed",  1:25, "median"),
+list("speed", 26:50, "median"))
+
+  
+## ──────────────────────────────────────────────────────────
+## 1-week blocks (traffic 50 + speed 50  →  총 100개)
+## ──────────────────────────────────────────────────────────
+sp_all_1wk <- list(
+  ## ── traffic ─────────────────────────────────────────────
+	  list("traffic",  1:1 , "mean"),  list("traffic",  2:2 , "mean"),
+  list("traffic",  3:3 , "mean"),  list("traffic",  4:4 , "mean"),
+  list("traffic",  5:5 , "mean"),  list("traffic",  6:6 , "mean"),
+  list("traffic",  7:7 , "mean"),  list("traffic",  8:8 , "mean"),
+  list("traffic",  9:9 , "mean"),  list("traffic", 10:10, "mean"),
+  list("traffic", 11:11, "mean"),  list("traffic", 12:12, "mean"),
+  list("traffic", 13:13, "mean"),  list("traffic", 14:14, "mean"),
+  list("traffic", 15:15, "mean"),  list("traffic", 16:16, "mean"),
+  list("traffic", 17:17, "mean"),  list("traffic", 18:18, "mean"),
+  list("traffic", 19:19, "mean"),  list("traffic", 20:20, "mean"),
+  list("traffic", 21:21, "mean"),  list("traffic", 22:22, "mean"),
+  list("traffic", 23:23, "mean"),  list("traffic", 24:24, "mean"),
+  list("traffic", 25:25, "mean"),  list("traffic", 26:26, "mean"),
+  list("traffic", 27:27, "mean"),  list("traffic", 28:28, "mean"),
+  list("traffic", 29:29, "mean"),  list("traffic", 30:30, "mean"),
+  list("traffic", 31:31, "mean"),  list("traffic", 32:32, "mean"),
+  list("traffic", 33:33, "mean"),  list("traffic", 34:34, "mean"),
+  list("traffic", 35:35, "mean"),  list("traffic", 36:36, "mean"),
+  list("traffic", 37:37, "mean"),  list("traffic", 38:38, "mean"),
+  list("traffic", 39:39, "mean"),  list("traffic", 40:40, "mean"),
+  list("traffic", 41:41, "mean"),  list("traffic", 42:42, "mean"),
+  list("traffic", 43:43, "mean"),  list("traffic", 44:44, "mean"),
+  list("traffic", 45:45, "mean"),  list("traffic", 46:46, "mean"),
+  list("traffic", 47:47, "mean"),  list("traffic", 48:48, "mean"),
+  list("traffic", 49:49, "mean"),list("traffic", 50:50, "mean"),
+#  list("traffic", 51:51, "mean"),
+
+#,
+  ## ── speed ──────────────────────────────────────────────
+	  list("speed",  1:1 , "median"),  list("speed",  2:2 , "median"),
+  list("speed",  3:3 , "median"),  list("speed",  4:4 , "median"),
+  list("speed",  5:5 , "median"),  list("speed",  6:6 , "median"),
+  list("speed",  7:7 , "median"),  list("speed",  8:8 , "median"),
+  list("speed",  9:9 , "median"),  list("speed", 10:10, "median"),
+  list("speed", 11:11, "median"),  list("speed", 12:12, "median"),
+  list("speed", 13:13, "median"),  list("speed", 14:14, "median"),
+  list("speed", 15:15, "median"),  list("speed", 16:16, "median"),
+  list("speed", 17:17, "median"),  list("speed", 18:18, "median"),
+  list("speed", 19:19, "median"),  list("speed", 20:20, "median"),
+  list("speed", 21:21, "median"),  list("speed", 22:22, "median"),
+  list("speed", 23:23, "median"),  list("speed", 24:24, "median"),
+  list("speed", 25:25, "median"),  list("speed", 26:26, "median"),
+  list("speed", 27:27, "median"),  list("speed", 28:28, "median"),
+  list("speed", 29:29, "median"),  list("speed", 30:30, "median"),
+  list("speed", 31:31, "median"),  list("speed", 32:32, "median"),
+  list("speed", 33:33, "median"),  list("speed", 34:34, "median"),
+  list("speed", 35:35, "median"),  list("speed", 36:36, "median"),
+  list("speed", 37:37, "median"),  list("speed", 38:38, "median"),
+  list("speed", 39:39, "median"),  list("speed", 40:40, "median"),
+  list("speed", 41:41, "median"),  list("speed", 42:42, "median"),
+  list("speed", 43:43, "median"),  list("speed", 44:44, "median"),
+  list("speed", 45:45, "median"),  list("speed", 46:46, "median"),
+  list("speed", 47:47, "median"),  list("speed", 48:48, "median"),
+  list("speed", 49:49, "median"),list("speed", 50:50, "median"))
+#  list("speed", 51:51, "median"))
+
+sp_25 <- list(
+  ## ── traffic: 1–50주를 2주씩 끊어 median
+  list("traffic",  1:2,  "median"),
+  list("traffic",  3:4,  "median"),
+  list("traffic",  5:6,  "median"),
+  list("traffic",  7:8,  "median"),
+  list("traffic",  9:10, "median"),
+  list("traffic", 11:12, "median"),
+  list("traffic", 13:14, "median"),
+  list("traffic", 15:16, "median"),
+  list("traffic", 17:18, "median"),
+  list("traffic", 19:20, "median"),
+  list("traffic", 21:22, "median"),
+  list("traffic", 23:24, "median"),
+  list("traffic", 25:26, "median"),
+  list("traffic", 27:28, "median"),
+  list("traffic", 29:30, "median"),
+  list("traffic", 31:32, "median"),
+  list("traffic", 33:34, "median"),
+  list("traffic", 35:36, "median"),
+  list("traffic", 37:38, "median"),
+  list("traffic", 39:40, "median"),
+  list("traffic", 41:42, "median"),
+  list("traffic", 43:44, "median"),
+  list("traffic", 45:46, "median"),
+  list("traffic", 47:48, "median"),
+  list("traffic", 49:50, "median"),
+
+  ## ── speed: 1–50주를 10개 블록(5주씩)으로 나누어 mean
+  list("speed",  1:25,   "mean"),
+  list("speed",  26:50,  "mean")
+)
+
+sp_all_in_time <- list(
+  ## ── traffic ─────────────────────────────────────────────
+	  list("traffic",  1:1 , "mean"),  list("traffic",  2:2 , "mean"),
+  list("traffic",  3:3 , "mean"),  list("traffic",  4:4 , "mean"),
+  list("traffic",  5:5 , "mean"),  list("traffic",  6:6 , "mean"),
+  list("traffic",  7:7 , "mean"),  list("traffic",  8:8 , "mean"),
+  list("traffic",  9:9 , "mean"),  list("traffic", 10:10, "mean"),
+  list("traffic", 11:11, "mean"),  list("traffic", 12:12, "mean"),
+  list("traffic", 13:13, "mean"),  list("traffic", 14:14, "mean"),
+  list("traffic", 15:15, "mean"),  list("traffic", 16:16, "mean"),
+  list("traffic", 17:17, "mean"),  list("traffic", 18:18, "mean"),
+  list("traffic", 19:19, "mean"),  list("traffic", 20:20, "mean"),
+  ## ── speed ──────────────────────────────────────────────
+  list("speed",    1:20, "mean"))
+
+
+sp_2_in_time <- list(
+    ## ── traffic ───────────────────────────────
+  list("traffic",  1:2 , "mean"),
+  list("traffic",  3:4 , "mean"),
+  list("traffic",  5:6 , "mean"),
+  list("traffic",  7:8 , "mean"),
+  list("traffic",  9:10, "mean"),
+  list("traffic", 11:12, "mean"),
+  list("traffic", 13:14, "mean"),
+  list("traffic", 15:16, "mean"),
+  list("traffic", 17:18, "mean"),
+  list("traffic", 19:20, "mean"),
+  
+  ## ── speed ──────────────────────────────────────────────
+  list("speed",    1:20, "mean"))
+
+
+
+sp_all <- list(                              # traffic 11블록 + speed 1블록
+  list("traffic", 1:4,  "mean"),  list("traffic", 5:8,  "mean"),
+  list("traffic", 9:13, "mean"),  list("traffic",14:17, "mean"),
+  list("traffic",18:21, "mean"),  list("traffic",22:26, "mean"),
+  list("traffic",27:30, "mean"),  list("traffic",31:33, "mean"),
+  list("traffic",34:36, "mean"),   list("traffic",37:39, "mean"),  list("traffic",40:42, "mean"),  list("traffic",43:45, "mean"), list("traffic",46:48, "mean"),  list("traffic",49:51, "mean"),
+  list("speed", 1:4,  "mean"),  list("speed", 5:8,  "mean"),
+  list("speed", 9:13, "mean"),  list("speed",14:17, "mean"),
+  list("speed",18:21, "mean"),  list("speed",22:26, "mean"),
+  list("speed",27:30, "mean"),  list("speed",31:33, "mean"),
+  list("speed",34:36, "mean"),   list("speed",37:39, "mean"),  list("speed",40:42, "mean"),  list("speed",43:45, "mean"), list("speed",46:48, "mean") ,   list("speed",49:51, "mean"))
+
+sp_short <- list(
+  list("traffic", 1:8, "mean"),
+    list("traffic", 9:17, "mean"),
+  list("traffic",18:30, "mean"),
+  list("traffic",31:43, "mean"),
+  list("traffic",44:48, "mean"),
+  list("speed",1:48, "mean"))
+
+sp_4 <- list(
+  # ── traffic 4블록 (분기별) ──
+  list("traffic",  1:13,  "mean"),
+  list("traffic", 14:26,  "mean"),
+  list("traffic", 27:39,  "mean"),
+  list("traffic", 40:51,  "mean"),
+
+  # ── speed 4블록 (분기별) ──
+  list("speed",  1:13,  "mean"),
+  list("speed", 14:26,  "mean"),
+  list("speed", 27:39,  "mean"),
+  list("speed", 40:51,  "mean")
+)
+
+
+sp_idx <- list(
+  list("traffic_idx", 1:4, "mean"),
+    list("traffic_idx", 5:8, "mean"),
+    list("traffic_idx", 9:13, "mean"),
+  list("traffic_idx",14:17, "mean"),
+  list("traffic_idx",18:21, "mean"),
+  list("traffic_idx",22:26, "mean"),
+    list("traffic_idx", 27:30,  "mean"),
+  list("traffic_idx", 31:35, "mean"),
+  list("traffic_idx", 36:39, "mean"),
+  list("traffic_idx", 40:43, "mean"),
+  list("traffic_idx", 44:49, "mean"),
+  list("speed", 1:4, "mean"),
+    list("speed", 5:8, "mean"),
+      list("speed", 9:13, "mean"),
+  list("speed",14:17, "mean"),
+  list("speed",18:21, "mean"),
+  list("speed",22:26, "mean"),
+    list("speed", 27:30,  "mean"),
+  list("speed", 31:35, "mean"),
+  list("speed", 36:39, "mean"),
+  list("speed", 40:43, "mean"),
+  list("speed", 44:49, "mean"))
+
+
+sp_idx_1speed <- list(
+  list("traffic_idx", 1:4, "mean"),
+    list("traffic_idx", 5:8, "mean"),
+    list("traffic_idx", 9:13, "mean"),
+  list("traffic_idx",14:17, "mean"),
+  list("traffic_idx",18:21, "mean"),
+  list("traffic_idx",22:26, "mean"),
+    list("traffic_idx", 27:30,  "mean"),
+  list("traffic_idx", 31:35, "mean"),
+  list("traffic_idx", 36:39, "mean"),
+  list("traffic_idx", 40:43, "mean"),
+  list("traffic_idx", 44:50, "mean"),
+  list("speed", 1:50, "mean"))
+
+sp_idx_4 <- list(
+  # ── traffic 4블록 (분기별) ──
+  list("traffic_idx",  1:13,  "mean"),
+  list("traffic_idx", 14:26,  "mean"),
+  list("traffic_idx", 27:39,  "mean"),
+  list("traffic_idx", 40:50,  "mean"),
+
+  # ── speed 4블록 (분기별) ──
+  list("speed",  1:13,  "mean"),
+  list("speed", 14:26,  "mean"),
+  list("speed", 27:39,  "mean"),
+  list("speed", 40:50,  "mean")
+)
+
+#write.csv(lookup_tbl, "/Users/maeg/Downloads/Thesis_Materials/Thesis_spotted/preprocessed/lookup_tbl_0722.csv", row.names = FALSE, fileEncoding = "CP949")
+date_tbl <- df_scm %>% select(week, week_index) %>% distinct()
+```
+```{r}
+library(dplyr)
+library(tidyr)
+
+## 1️⃣ 인코딩·자료형 정리
+df_u <- df_scm %>%
+  mutate(
+    unit_id    = as.integer(unit_id),
+    week_index = as.integer(week_index)
+  )
+
+## 2️⃣ 중복 key(unit_id × week_index) 검사
+dup_key <- df_u %>%
+  count(unit_id, week_index, name = "n") %>%
+  filter(n > 1)                 # n == 1 이 정상, >1 이면 중복
+
+if (nrow(dup_key) == 0) {
+  message("✅ 중복 행 없음 (unit × week_index 는 모두 1회씩만 존재)")
+} else {
+  print(dup_key)               # 어떤 unit·week 가 몇 번 나오는지 확인
+}
+
+## 3️⃣ 빠진 주(week) 검사
+full_weeks <- 1:max(df_u$week_index)          # 원하는 주 범위
+missing <- df_u %>%
+  complete(unit_id, week_index = full_weeks) %>%   # NA 행도 만들기
+  filter(is.na(traffic) & is.na(speed))            # 실제 데이터가 없는 행
+
+if (nrow(missing) == 0) {
+  message("✅ 누락 주 없음 (모든 unit 이 지정 구간의 모든 주 행을 보유)")
+} else {
+  print(missing %>% arrange(unit_id, week_index))
+}
+```
+
+
+#plot
+```{r}
+
+library(plotly)
+ids_to_remove <- c(   setdiff(1:14, 4))
+
+# 만약 unit_id 가 character 벡터라면 as.character() 해주고 따옴표 쓰기
+# ids_to_remove <- as.character(ids_to_remove)
+
+# 2) 필터링
+df_scm_plot <- df_scm %>%
+  filter( !unit_id %in% ids_to_remove ) %>%
+  filter(week_index < 74)
+
+
+fig_all <- plot_ly(
+  data = df_scm_plot,
+  x    = ~week,
+  y    = ~traffic,
+  color= ~unit_name_en,        # 노선별 색깔
+  type = 'scatter',
+  mode = 'lines',
+  hovertemplate = paste(
+    "Region: %{customdata[0]}<br>",
+    "Road: %{legendgroup}<br>",
+    "Week: %{x|%Y-%m-%d}<br>",
+    "Traffic: %{y:,} veh"
+  ),
+  legendgroup = ~routeNM,        # hovertemplate에서 legendgroup 을 routeNM 으로 쓸 수 있게
+  customdata = ~region            # hovertemplate에서 region 찍으려면 customdata[0]
+) %>%
+  layout(
+  title = list(text = "주별 출퇴근 중앙값 교통량TRUE"),
+    xaxis = list(title = "Week", tickformat = "%Y-%m-%d"),
+    yaxis = list(title = "Traffic (vehicles/day)"),
+    legend = list(title = list(text = "<b>Route | linkID</b>"),
+                        orientation = "h",    # horizontal
+      x = 0.5,              # x축 중앙
+      xanchor = "center",   # 중앙 기준
+      y = -0.2,             # plot 아래로 내림
+      yanchor = "top"       # y 기준을 범례 위쪽으로
+    ))
+
+fig_all
+```
+
+
+```{r}
+# dp_refined 는 dataprep() 결과 객체
+X0 <- as.matrix(dp_refined$X0)      # 예측변수 매트릭스
+anyNA(X0)                           # TRUE 면 NA 존재
+any(is.nan(X0))                    # TRUE 면 NaN 존재
+any(is.infinite(X0))               # TRUE 면 Inf 존재
+
+zero_var <- apply(X0, 2, function(x) sd(x, na.rm=TRUE)==0)
+if (any(zero_var)) {
+  X0 <- X0[, !zero_var]
+  dp_refined$X0 <- X0
+  dp_refined$predictors  <- dp_refined$predictors[!zero_var]
+}
+
+```
+
+```{r}
+# X0: Inf/NaN 제거 후, 분산0·고상관 변수도 제거 전 상태
+sv <- svd(X0)$d    # singular values 벡터
+print(sv)
+
+# 최소 singular value
+min_sv <- min(sv)
+cat("최소 singular value =", format(min_sv, digits=3), "\n")
+```
+```{r}
+# dp_refined$Y0plot, dp_refined$Y1plot 은 matrix 형태
+any(!is.finite(dp_refined$Y0plot))   # TRUE 면 NA/Inf 존재
+any(!is.finite(dp_refined$Y1plot))
+```
+
+
+
+
+### 3: rough SCM
+
+
+```{}
+library(dplyr)
+
+library(dplyr)
+
+# ——————————————————————————————————————
+# 1. 중복 제거 및 지표 계산 (기존 traffic/speed 덮어쓰기)
+# ——————————————————————————————————————
+df_src <- df_scm %>%
+  distinct() %>%                              # 완전 중복 행 제거
+  group_by(unit_id) %>%
+  mutate(
+    # 사전기간 평균 대비 편차를 speed에 덮어쓰기
+    speed = speed - mean(speed[week_index <= n_pre], na.rm = TRUE),
+    # 사전기간 평균을 100으로 놓고 지수화하여 traffic에 덮어쓰기
+    traffic = 100 * traffic / mean(traffic[week_index <= n_pre], na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# ——————————————————————————————————————
+# 2. Z-스케일링 (열 기준)
+# ——————————————————————————————————————
+# good_preds_new 에는 스케일링할 열 이름 벡터를 지정하세요.
+# 예: good_preds_new <- c("speed", "traffic", "lanes.min", "lanes.max")
+df_src[ , good_preds_o] <- scale(
+  df_src[ , good_preds_o],
+  center = TRUE,
+  scale  = TRUE
+)
+
+# ——————————————————————————————————————
+# 3. 최종 df_scm 으로 재할당
+# ——————————————————————————————————————
+df_scm_idx <- df_src
+```
+
+
+#=====================
+#>= 175,    unit_id <= 295, second_vec = 234~253, last_vec = 254~295
+
+## 첫 SCM : 여기서는 기본 데이터의 적합도를 본다. 
+##. last_vec과 Second_vec모두 실시하여 얼마나 달라지는지 확인한다.
+#=====================
+
+
+
+
+```{r}
+
+####2024-08-26 82
+####2024-10-28 91
+###!unit_id %in% c(179, 181, 183, 187, 193, 195, 196, 217, 203,199,200)) 
+#, !unit_id %in% c(217)
+library("beepr")
+library(Synth)
+
+
+
+options(scipen = 999)
+
+donor_ok_ids <- df_scm %>%
+  filter(unit_id >= 15) %>%
+  distinct(unit_id) %>%  # 고유값만
+  pull(unit_id)   
+
+
+n_all <- 70
+n_pre <- 50
+length(donor_ok_ids)
+
+treat_id <- 4
+
+
+## 1️⃣  도로·방향 정보 한꺼번에 가져오기 ----------------------
+road_info <- lookup_tbl %>% 
+  filter(unit_id == treat_id) %>%    # treated ID (41)
+  slice(1) %>%                       # 혹시 모를 중복 방지
+  mutate(
+    dir_lbl = ifelse(direction == 1, "NB", "SB")  # 방향 라벨링
+  )
+
+## 2️⃣  (선택) 둘을 한 문자열로 합치기 ------------------------
+road_lbl <- with(road_info, paste0(road_en, " ", dir_lbl))
+## 또는 tidyr::unite() 버전
+# road_lbl <- road_info %>% unite(road_lbl, road_en, dir_lbl, sep = " ") %>% pull(road_lbl)
+
+## 3️⃣  범례 레이블 제작 -------------------------------------
+legend_lbl <- c(
+  paste0("Treated (",   road_lbl, ")"),
+  paste0("Synthetic (", road_lbl, ")")
+)
+legend_lbl2 <- c(
+  paste0(road_lbl))
+
+
+good_preds <- c("lanes.min", "speed.max", "lanes.max", "local_share") #c("lanes.min", "local_length_km", "total_length_km","speed.min", "speed.max" , "lanes.max")
+
+
+good_preds_o <- c("lanes.min","lanes.max","local_length","total_length","speed.min", "speed.max", "local_share")
+
+good_preds_new <- c("lanes.max", "speed.max", "local_length", "total_length", "local_share")
+
+
+##########################
+dp_params <- list(
+  foo                     = as.data.frame(df_scm),
+  predictors              = good_preds_new,
+  predictors.op           = "mean",
+  special.predictors      = sp_32, #, #sp_all_1wk, # sp_2_all, sp_32,
+  dependent               = "traffic",
+  unit.variable           = "unit_id",
+  unit.names.variable     = "unit_name_en",
+  time.variable           = "week_index",
+  treatment.identifier    = treat_id,          # 실제 처리군 ID
+  controls.identifier     = donor_ok_ids,    # 정제된 donor IDs
+  time.predictors.prior   = 1:n_pre,
+  time.optimize.ssr       = 1:n_pre,
+  time.plot               = 1:n_all
+)
+
+
+# 3-1) dataprep with refined donor pool
+dp_refined <- do.call(dataprep, dp_params)
+
+
+
+# 3-3) ipop 기반 합성대조군 적합
+so_refined <- synth(data.prep.obj = dp_refined)
+
+
+############################################################################
+## 3. 효과(gap) 계산 & 그림
+############################################################################
+gaps_main <- dp_refined$Y1plot - (dp_refined$Y0plot %*% so_refined$solution.w)
+
+# ── 공통 변수 ──────────────────────────────────────────────────────────
+week_all  <- dp_refined$tag$time.plot              # 1,2,3,… 전체 주차
+lab_major <- c(1, seq(5, max(week_all), by = 5)) # 1,5,10,15,… 원하는 레이블
+
+
+
+# ── 1) 궤적(Path) 플롯 ──────────────────────────────────────────────────
+
+#===gap
+# 0. 결과 그림 -------------------------------------------------------------
+path.plot(
+  synth.res    = so_refined,
+  dataprep.res = dp_refined,
+  Main            = paste0("SCM Path Plot – ", road_lbl),  # ← title here
+  Ylab = "Weekly traffic",
+  Xlab = "Week",
+  Legend = legend_lbl,
+  Legend.position = "bottomright"
+)
+
+# 1. 회색 격자선 -----------------------------------------------------------
+abline(v = week_all, col = "grey90", lty = "dotted")
+
+# 2. 이벤트 정의  ← 여기만 바꾸면 됨! --------------------------------------
+event_pos <- c(n_pre + 1)        # x 좌표
+event_lty <- c(2)        # 선 종류
+event_lab <- c("CCC launch")
+
+# 3. 선 + 레이블 -----------------------------------------------------------
+# (A) 수직선
+mapply(abline, v = event_pos, lty = event_lty)
+
+# (B) 레이블 – 선 바로 아래, 가로 글씨
+y_lab <- par("usr")[3] + diff(par("usr")[3:4]) * 0.05   # y축 최저값에서 5 % 위
+text(event_pos, y_lab,
+     labels = event_lab,
+     cex = 0.75,          # 글씨 크기
+     adj = c(0.5, 1),     # 가운데·아래 정렬
+     xpd = TRUE)
+
+# 4. x축 눈금 (굵은 눈금만 표시) ------------------------------------------
+axis(1, at = axTicks(1), labels = FALSE)              # 기본 눈금 숨기고
+axis(1, at = lab_major, labels = lab_major,           # 주요 눈금만 다시
+     las = 1, cex.axis = 0.8)
+
+
+
+############################################################################
+## 3-bis. 사전·사후 RMSPE 및 Ratio 계산  ← ★ 추가
+############################################################################
+pre_rmspe  <- sqrt(mean(gaps_main[ 1:n_pre            ]^2))
+post_rmspe <- sqrt(mean(gaps_main[ (n_pre+1):n_all    ]^2))
+ratio_main <- post_rmspe / pre_rmspe
+
+cat(sprintf(
+  "\n▶ Baseline RMSPE  |  Pre = %.3f   Post = %.3f   Ratio = %.3f\n",
+  pre_rmspe, post_rmspe, ratio_main
+))
+
+
+vline <- n_pre + 1  
+# 깨끗한 버전
+path.plot(synth.res   = so_refined,
+          dataprep.res= dp_refined,
+          Main            = paste0("SCM Path Plot – ", road_lbl),  # ← title here
+          Ylab = "Weekly traffic", Xlab = "Week",
+          Legend = legend_lbl,
+          Legend.position = "bottomleft")
+abline(v = n_pre + 1, lty = 2)               # 정책선
+## ── 라벨 추가 ──────────────────────────────────────────────
+text(
+  x     = vline,                   # 문자 x 위치 = 선 위치
+  y     = par("usr")[3] + 0.75*diff(par("usr")[3:4]),  # y = 아래쪽에서 5% 높이
+  labels= "CCC Launch -> ",            # 원하는 문구
+  adj   = 1,                       # 글씨 왼쪽이 선과 붙도록
+  cex   = 0.75,                    # 글씨 크기
+  xpd   = TRUE                     # 플롯 영역 밖에도 그리기 허용
+)
+
+gaps.plot(synth.res   = so_refined,
+          dataprep.res= dp_refined,
+          Main            = paste0("Gap Plot – ", legend_lbl2),  # ← title here
+          Ylab = "Gap", Xlab = "Week")
+abline(v = n_pre + 1, lty = 2)
+
+## ── 라벨 추가 ──────────────────────────────────────────────
+text(
+  x     = vline,                   # 문자 x 위치 = 선 위치
+  y     = par("usr")[3] + 0.75*diff(par("usr")[3:4]),  # y = 아래쪽에서 5% 높이
+  labels= "CCC Launch -> ",            # 원하는 문구
+  adj   = 1,                       # 글씨 왼쪽이 선과 붙도록
+  cex   = 0.75,                    # 글씨 크기
+  xpd   = TRUE                     # 플롯 영역 밖에도 그리기 허용
+)
+
+# 4️⃣ 가중치·밸런스 (정리 버전)
+syn_fix <- so_refined
+syn_fix$solution.v <- as.numeric(syn_fix$solution.v)
+
+stab <- synth.tab(dataprep.res = dp_refined,
+                  synth.res   = so_refined,
+                  round.digit = 10)
+
+# 도너 가중치 테이블 한 번만 생성
+weights_tbl <- stab$tab.w %>%
+  arrange(desc(w.weights))
+
+print(weights_tbl, row.names = FALSE)
+
+
+
+cat(sprintf(
+  "\n▶ Baseline RMSPE  |  Pre = %.3f   Post = %.3f   Ratio = %.3f\n",
+  pre_rmspe, post_rmspe, ratio_main
+))
+
+
+
+att_pct <- mean(gaps_main[(n_pre+1):n_all])      # %-point ATT
+
+baseline_pre <- df_scm %>%
+  filter(
+    unit_id    == treat_id,   # 처리 대상 도로 ID
+    week_index <= n_pre             # 개입 이전 주(week)만
+  ) %>%
+  summarise(pre_mean = mean(traffic, na.rm = TRUE)) %>%
+  pull(pre_mean)
+
+eff_final <- (att_pct/baseline_pre)*100
+
+cat(sprintf(
+  "\n▶ Final RMSPE | Pre = %.3f   Post = %.3f   Ratio = %.3f | ATT = %.3f |ATT ratio =%.3f ",
+  pre_rmspe, post_rmspe, ratio_main, att_pct, eff_final
+))
+
+goal_v <- baseline_pre*0.19775
+
+cat(sprintf(
+  "\n▶ Traffic before treat = %.3f   Expected traffic = %.3f  diff = %.3f",
+  baseline_pre,  goal_v, abs(goal_v-att_pct)
+))
+
+
+
+
+# weights 벡터(합이 1인 numeric)를 가정
+library(tibble)
+library(dplyr)
+
+library(dplyr)
+
+dispersion_metrics <- weights_tbl %>% 
+  summarise(
+    max_w      = max(w.weights),           # 최대 가중치
+    N_eff      = 1 / sum(w.weights^2),     # 효과적 도너 수
+    HHI        = 10000 * sum(w.weights^2), # Herfindahl Index
+    top2_share = sum(sort(w.weights, decreasing = TRUE)[1:2]),
+    top3_share = sum(sort(w.weights, decreasing = TRUE)[1:3]),
+    top4_share = sum(sort(w.weights, decreasing = TRUE)[1:4])
+  )
+
+print(dispersion_metrics)
+
+```
+
+#index cal
+
+
+
+```{r}
+# 1) Compute the SD of the treated series in the pre-period
+sd_pre <- df_scm %>%
+  filter(unit_id == treat_id, week_index <= n_pre) %>%
+  pull(traffic) %>%
+  sd(na.rm = TRUE)
+
+# 2) Back-transform your metrics
+pre_rmspe_orig   <- pre_rmspe   * sd_pre
+post_rmspe_orig  <- post_rmspe  * sd_pre
+att_orig         <- att_pct     * sd_pre      # if att_pct is ATT in same units
+eff_orig         <- eff_final   * sd_pre      # if eff_final is ATT ratio in same units
+
+# (Ratio and percentage‐based metrics stay the same)
+ratio_main_orig  <- ratio_main    # unchanged
+att_ratio_orig   <- att_pct / pre_rmspe  # if you want the ATT/RMSPE ratio
+
+# 3) Print with your original scale
+cat(sprintf(
+  "\n▶ Original-scale RMSPE | Pre = %.1f   Post = %.1f   Ratio = %.3f",
+  pre_rmspe_orig, post_rmspe_orig, ratio_main_orig
+))
+cat(sprintf(
+  "\n▶ Original-scale ATT  = %.1f   ATT-to-RMSPE ratio = %.3f",
+  att_orig, att_orig / pre_rmspe_orig
+))
+```
+
+
+#SCM 결과 
+#=========
+
+
+```{r}
+# (a) ordinary predictors
+pred_idx   <- dp_refined$tag$predictors
+pred_names <- colnames(df_scm)[ pred_idx ]
+
+# (b) special predictors with time labels
+sp         <- dp_refined$tag$special.predictors
+sp_names   <- vapply(sp, function(x){
+  var   <- x[[1]]
+  times <- x[[2]]
+  stat  <- x[[3]]
+  if(length(times)==1){
+    paste(var, stat, paste0("w", times), sep="_")
+  } else {
+    paste(var, stat, paste0("w", min(times), "-w", max(times)), sep="_")
+  }
+}, character(1))
+
+# (c) 합치기
+all_names <- c(pred_names, sp_names)
+
+# (d) v-weights 테이블 생성
+imp <- data.frame(
+  predictor = all_names,
+  weight    = as.numeric(so_refined$solution.v)
+)
+imp <- imp[order(-imp$weight), ]
+print(imp)
+```
+
+```{r}
+# 1) 사전(outcome) 행렬 꺼내기
+Y0      <- dp_refined$Y0plot          # 행 = 주, 열 = 도너 유닛
+unit_id <- dp_refined$tag$controls.identifier
+colnames(Y0) <- unit_id               # 열 이름 붙이기
+
+# 2) 상관행렬 계산
+corr_mat <- cor(Y0, use = "pairwise.complete.obs")
+
+# 3) 0.95 이상 상관인 쌍 찾기
+high_idx <- which(corr_mat > 0.95 & corr_mat < 1, arr.ind = TRUE)
+
+dup_df <- data.frame(
+  row_idx  = high_idx[, "row"],
+  col_idx  = high_idx[, "col"],
+  unit_row = rownames(corr_mat)[high_idx[, "row"]],
+  unit_col = colnames(corr_mat)[high_idx[, "col"]]
+) 
+
+
+dup_df <- dup_df %>% 
+  filter(unit_row != unit_col) %>%   # 같은 ID 행 제거
+  filter(row_idx < col_idx)          # 대칭 중복 제거
+
+
+# (1) corr_mat 이미 만들어 둔 상태에서 ────
+hi <- which(corr_mat > 0.95 & upper.tri(corr_mat), arr.ind = TRUE)
+
+# (2) 인덱스를 ID로 변환
+pairs_high <- tibble(
+  id_a = rownames(corr_mat)[hi[, "row"]],
+  id_b = colnames(corr_mat)[hi[, "col"]],
+  rho  = corr_mat[hi]                     # 실제 상관값
+)
+
+print(pairs_high)
+```
+
+```{r}
+orig_id <- dp_refined$tag$controls.identifier      # 예: "34_..."
+cur_id  <- colnames(dp_refined$Y0plot)             # 열 이름에 붙어있는 ID
+
+# 숫자 부분만 추출
+get_num <- function(x) as.integer(sub("^([0-9]+).*", "\\1", x))
+
+delta <- get_num(orig_id) - get_num(cur_id)
+table(delta)
+```
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+dup_df_adj <-dup_df %>% 
+  mutate(
+    unit_row = str_replace(
+      unit_row,               # 변환 대상 열
+      "^([0-9]+)",            # ID 맨 앞 연속 숫자 캡처
+      ~ as.character(as.integer(.x) - 13)   # 13 빼고 문자로
+    ),
+    unit_col = str_replace(
+      unit_col,
+      "^([0-9]+)",
+      ~ as.character(as.integer(.x) - 13)
+    )
+  )
+```
+
+
+
+```{r}
+u1 <- "59"  # 예시 ID
+u2 <- "36"                                        # 실제 ID
+
+ts1 <- df_scm %>% filter(unit_id == u1, week_index <= 50) %>% pull(traffic)
+ts2 <- df_scm %>% filter(unit_id == u2, week_index <= 50) %>% pull(traffic)
+
+# 겹치는 주 수
+sum(!is.na(ts1) & !is.na(ts2))
+
+# 상관값
+cor(ts1, ts2, use = "complete.obs")
+```
+
+###placebos
+
+```{r}
+# 1️⃣ SCtools 로드
+library(SCtools)
+set.seed(2025)     
+# dp_final, so_final 은 앞서 만든 최종 dataprep & synth 결과입니다.
+
+# 2️⃣ placebo 합성대조군 생성
+#    - Sigf.ipop: ipop 최적화 정밀도 (기본 5)
+#    - strategy: "sequential" 또는 병렬 "multiprocess"
+placebos_refined_ipop5 <- generate.placebos(
+  dataprep.out = dp_refined,
+  synth.out    = so_refined,
+  Sigf.ipop    = 2,
+  strategy     = "sequential"
+)  
+# → 반환값(placebos)은 tdf 객체로, 원본 처리군과 각 placebo의 Y & Y_synth 시계열, 
+#    사전 MSPE(mspe.placs) 등을 담고 있습니다  
+
+# 3️⃣ placebo 분포 플롯
+#    - plot_placebos(): 모든 placebo gap + 처리군 gap을 일괄 시각화
+plot_placebos(placebos_refined_ipop5)  
+
+# 4️⃣ MSPE test (p-value 계산)
+test_out_refined <- mspe.test(placebos_refined_ipop5)
+cat("▶ Final p-value =", round(test_out_refined$p.val, 3), "\n")  
+
+beep(5)
+
+```
+
+
+```{r}
+# ❶ MSPE test: pre-MSPE > 5× 인 플라시보 제외 후 p-값 계산
+test_out_refinedx5 <- mspe.test(placebos_refined_ipop5,
+                      discard.extreme = TRUE,   # ← 필터 켜기
+                      mspe.limit      = 5)      # ← 5 배 기준
+cat("▶ filtered p-value =", round(test_out_refinedx5$p.val, 6), "\n")
+
+# ❷ MSPE ratio 플롯(점/히스토그램)도 동일 옵션
+mspe.plot(placebos_refined_ipop5,
+          discard.extreme = TRUE,
+          mspe.limit      = 5)
+
+# ❸ gap 궤적 플롯(plot_placebos) 역시 동일 인자 사용 가능
+plot_placebos(placebos_refined_ipop5,
+              discard.extreme = TRUE,
+              mspe.limit      = 5)
+```
+
+#covariates table
+
+```{r}
+# 1) 처리된 dataprep 결과가 dp_refined 라는 가정하에
+#    X1: 실제(처리군) 예측 변수 평균 (행: 변수, 열: 1)
+#    X0: 대조군 예측 변수 평균  (행: 변수, 열: 각 donor)
+
+# 2) 실제 평균 벡터
+real_means <- as.vector(dp_refined$X1)  # 길이 34
+
+# 3) 합성(가중 평균) 예측 변수 평균
+w <- so_refined$solution.w              # Donor별 합성 가중치 (길이 47)
+synthetic_means <- as.vector(dp_refined$X0 %*% w)  # 34 × 47  %*% 47×1 → 34×1
+
+# 4) 대조군 전체 평균 (단순 평균)
+control_means <- rowMeans(dp_refined$X0) # 길이 34
+
+# 5) 변수 이름
+vars <- rownames(dp_refined$X0)          # "lanes.max", "speed.max", ...
+
+# 6) 요약 테이블 생성
+summary_table <- data.frame(
+  Variable  = vars,
+  Real      = round(real_means,      2),
+  Synthetic = round(synthetic_means, 2),
+  Control   = round(control_means,   2),
+  row.names = NULL
+)
+
+knitr::kable(
+  summary_table,
+  caption = paste0(legend_lbl2, ": Predictor Means")
+)
+
+```
+
+####단측검정
+
+
+
+
+```{r}
+library(dplyr)
+
+## 1️⃣ 메타 정보
+meta_df <- placebos_refined_ipop5$names.and.numbers        # unit.numbers, unit.names
+
+## 2️⃣ pre-MSPE 벡터 만들기  (이름 = unit.numbers, 값 = pre-MSPE)
+mspe_vec <- setNames(
+  placebos_refined_ipop5$mspe.placs[[1]],                  # data-frame → 벡터
+  meta_df$unit.numbers                       # 동일한 행순서 활용
+)
+
+## 3️⃣ 처리 도로 pre-MSPE
+mspe_treat <- as.numeric(placebos_refined_ipop5$loss.v)     # scalar
+
+## 4️⃣ 5 배 컷오프 초과 플라시보 ID
+bad_ids <- names(mspe_vec)[ mspe_vec > 5 * mspe_treat ] |>
+           as.numeric()                      # 숫자형으로
+
+## 5️⃣ 제외된 유닛(도로) 목록
+excluded_units <- meta_df %>%
+  filter(unit.numbers %in% bad_ids) %>% print() %>% pull(unit.numbers)
+
+print(excluded_units)
+```
+
+
+```{r}
+library(stringr)
+# 3) ID 벡터 뽑기 ------------------------------
+treated_id  <- placebos_refined_ipop5$tr                    # 실제 treated 번호
+control_ids <- c(placebos_refined_ipop5[["names.and.numbers"]][["unit.numbers"]])
+
+## 0) convenience variables ---------------------------------
+treated_id  <- placebos_refined_ipop5$tr
+t1_row      <- placebos_refined_ipop5$t1          # first post-period row index
+
+## 1) reshape ------------------------------------------------
+
+# (2) wide → long 변환 -------------------------------------------
+placebos_refined_ipop5_long <- placebos_refined_ipop5$df 
+
+plb_long<- placebos_refined_ipop5_long %>%                 # 91 × 95 (예시)
+  rename(week_index = "year") %>%
+  mutate(week_index = as.integer(week_index)) %>% 
+  pivot_longer(                             # unit별로 세로로 녹이기
+    -week_index,
+    names_to  = "unit_id",
+    values_to = "value"
+  ) %>% 
+  mutate(
+    unit_id = as.character(unit_id),          # 문자 → 정수
+    post    = week_index >= t1_row          # 사후 구간 플래그
+  )
+
+gap_long <- plb_long %>% 
+  mutate(
+    type    = if_else(str_starts(unit_id, "synthetic\\."), "synthetic", "obs"),
+    unit_id = str_remove(unit_id, "^synthetic\\.")   # 숫자만 남김
+  ) %>% 
+  pivot_wider(names_from = type, values_from = value) %>% 
+  mutate(
+    gap = obs - synthetic      # (음수 → 교통량 감소)
+  ) %>%
+  filter(!unit_id %in% excluded_units)
+
+treated_id <- "Y1"                 # 또는 41 등
+control_ids <- gap_long %>% 
+  filter(!str_detect(unit_id, "[^0-9]")) %>%   # 숫자만
+  distinct(unit_id) %>% 
+  pull(unit_id) %>% 
+  setdiff(treated_id)
+
+# ① treated 단측 통계량 (감소면 음수)
+stat_treat <- gap_long %>% 
+  filter(unit_id == treated_id, post) %>% 
+  summarise(stat = sum(gap, na.rm = TRUE)) %>% 
+  pull(stat)
+
+# ② 컨트롤(placebo) 통계량
+placebo_stats <- gap_long %>% 
+  filter(unit_id %in% control_ids, post) %>% 
+  group_by(unit_id) %>% 
+  summarise(stat = sum(gap, na.rm = TRUE)) %>% 
+  pull(stat)
+
+# ③ ‘감소’ 방향 단측 p-value
+p_one <- (1 + sum(placebo_stats <= stat_treat)) /
+         (1 + length(placebo_stats))
+
+
+p_one
+```
+#===
+#단측검정 히스토그램
+
+```{r}
+# 1) 필요한 패키지 로드
+library(ggplot2)
+
+# 2) 데이터프레임으로 변환
+df_plot_placebos_refined_ipop5 <- data.frame(
+  stat = placebo_stats
+)
+
+# 3) 히스토그램 + 처리구간 통계량 표시
+p_placebos_refined_ipop5 <- ggplot(df_plot_placebos_refined_ipop5, aes(x = stat)) +
+  geom_histogram(binwidth = diff(range(df_plot_placebos_refined_ipop5$stat)) / 30,
+                 fill = "grey80", color = "white") +
+  geom_vline(xintercept = stat_treat,
+             color = "red", size = 1) +
+  labs(
+    title = "Placebo P-value Histogram (One tale? negative)",
+    subtitle = paste0("One tale p-value = ",
+                      round(p_one, 5)),
+    x = "Post Gap Sum(statistic)",
+    y = "Placebos"
+  ) +
+  theme_minimal()
+
+# 4) 출력
+print(p_placebos_refined_ipop5)
+
+```
+```{r}
+library(dplyr)
+
+# 1) post-treatment 구간의 gap 합계 계산
+post_sum <- gap_long %>%
+  filter(post == TRUE) %>%                     # post==TRUE 인 행만
+  group_by(unit_id) %>%                       
+  summarise(stat = sum(gap, na.rm = TRUE))    # gap 합계
+
+# 2) 최소 stat 에 해당하는 unit_id 추출
+min_unit <- post_sum %>%
+  slice_min(stat, n = 1) %>%  # stat 기준 최소 1개
+  pull(unit_id)
+
+# 3) lookup_tbl 에서 해당 unit_id 로 정보 가져오기
+result <- lookup_tbl %>%
+  filter(unit_id == min_unit)
+
+print(result)
+```
+
+
+
+
+```{r}
+# 1) names(placebo_stats) 에 도로 이름 붙이기
+#    test_out_refined$test 의 첫 번째 행이 처리군이므로, 그 이후가 플라시보 # 1) 필요한 패키지 로드
+library(dplyr)
+
+# 2) 사후 구간 정의
+#    dp_refined$dataprep.out$treatment_time 에 treatment 주기가 저장되어 있을 거예요.
+t0 <- dp_refined$dataprep.out$treatment_time
+
+# 3) unit_id별로 post-treatment gap 합계(stat) 계산
+post_sums <- gap_long %>%
+  filter(week_index > t0) %>%            # 사후 주차만
+  group_by(unit_id) %>%
+  summarize(stat = sum(gap, na.rm = TRUE))
+
+# 4) 가장 작은 stat를 갖는 유닛 찾기
+min_post <- post_sums %>% slice_min(stat, n = 1)
+
+# 5) unit_id → 도로명(routeNM) 매핑
+#    원본 데이터프레임(df_scm)에 unit_id별 routeNM이 들어있다고 가정
+unit_route <- df_scm %>% 
+  select(unit_id, routeNM) %>% 
+  distinct()
+
+min_post %>%
+  left_join(unit_route, by = "unit_id") -> result
+
+# 6) 결과 출력
+print(result)
+```
+
+
+# ─── Leave-One-Out Sensitivity ───
+
+```{r}
+
+n_pre <- 50     # length of pre-treatment period (weeks)
+threshold <- 150   # ΔATT magnitude for labelling
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+## Baseline ATT and pre-RMSPE
+att_baseline    <- mean(gaps_main[(n_pre+1):length(gaps_main)])
+pre_rmspe_full  <- sqrt(mean(gaps_main[1:n_pre]^2))
+
+cat("Baseline ATT       =", round(att_baseline, 1), "veh/day\n")
+cat("Baseline pre-RMSPE =", round(pre_rmspe_full, 2), "\n\n")
+
+
+# ── 2.  Leave-one-out loop  ─────────────────────────────────────────────────
+loo_att <- numeric(length(donor_ok_ids))
+loo_pre <- numeric(length(donor_ok_ids))
+names(loo_att) <- names(loo_pre) <- donor_ok_ids   # keep IDs as names
+
+for (excluded in donor_ok_ids) {
+
+  donors_loo <- setdiff(donor_ok_ids, excluded)
+
+  res <- tryCatch({
+    dp_loo <- do.call(dataprep,
+                      modifyList(dp_params,
+                                 list(controls.identifier = donors_loo)))
+    so_loo <- synth(dp_loo)
+
+    gaps <- dp_loo$Y1plot - drop(dp_loo$Y0plot %*% so_loo$solution.w)
+
+    c(pre = sqrt(mean(gaps[1:n_pre]^2)),
+      att = mean(gaps[(n_pre+1):length(gaps)]))
+
+  }, error = function(e) c(pre = NA, att = NA))  # graceful fail
+
+  loo_pre[as.character(excluded)] <- res["pre"]
+  loo_att[as.character(excluded)] <- res["att"]
+}
+
+# ── 3.  Tidy results tibble  ────────────────────────────────────────────────
+loo_df <- tibble(
+  donor_id   = names(loo_att),
+  att        = loo_att,
+  pre_rmspe  = loo_pre
+) %>%
+  mutate(
+    label       = ifelse(abs(att - att_baseline) > threshold, donor_id, ""),
+    big_pre_err = pre_rmspe > 5 * pre_rmspe_full
+  )
+
+print(loo_df, n = Inf)   # full table at a glance
+
+
+# ── 4.  Bar plot with highlights  ───────────────────────────────────────────
+ggplot(loo_df,
+       aes(x = reorder(donor_id, att), y = att, fill = big_pre_err)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c(`TRUE` = "tomato", `FALSE` = "grey70")) +
+  geom_hline(yintercept = att_baseline, colour = "red", linetype = 2) +
+  geom_text(aes(label = label),
+            vjust = ifelse(att < 0, 1.2, -0.2),
+            size  = 3, fontface = "bold") +
+  coord_flip() +
+  labs(x = NULL,
+       y = "ATT (post-treatment average gap, veh/day)",
+       title = "Leave-One-Out Sensitivity – ATT by Donor") +
+  theme_minimal(base_size = 12)
+
+#  Optionally use ggrepel to avoid overlaps:
+#  + ggrepel::geom_text_repel(aes(label = label), size = 3, direction = "y")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  End of script
+# ─────────────────────────────────────────────────────────────────────────────
+```
+
+```{r}
+ggplot(loo_df,
+       aes(x = att, y = reorder(donor_id, att), fill = big_pre_err)) +
+  geom_col(width = 0.9, colour = "grey25", linewidth = 0.3, show.legend = FALSE) +
+  geom_vline(xintercept = att_baseline, colour = "red", linetype = 2, linewidth = 0.7) +
+  geom_text(aes(label = label),
+            hjust = -0.05, vjust = 0.5,
+            size = 3, fontface = "bold") +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05))) +
+  scale_fill_manual(values = c(`TRUE` = "tomato", `FALSE` = "grey70")) +
+  labs(title = "Leave-One-Out Sensitivity – ATT by Donor",
+       x = "ATT (post-treatment avg gap, veh/day)",
+       y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 7)   # ← 왼쪽 글씨(도너 ID)만 작게
+  )
+```
+
+
+```{r}
+# loo_df: donor_id, att, pre_rmspe, weight 가 있는 데이터프레임
+
+baseline <- mean(gaps_main[(n_pre+1):length(gaps_main)])
+
+loo_df1 <- loo_df %>%            # 이미 갖고 있는 테이블
+  mutate(
+    delta   = att - baseline,   # 빠졌을 때 변화량
+    signflip= sign(att) != sign(baseline)
+  )
+
+loo_df1       <- loo_df1       %>% mutate(donor_id  = as.integer(donor_id))
+weights_tbl2  <- weights_tbl  %>% mutate(unit.numbers = as.integer(unit.numbers))
+
+
+loo_df2 <- loo_df1 %>% 
+  left_join(weights_tbl2 , by = c("donor_id"="unit.numbers"))
+
+
+thr <- 3 * mad(loo_df2$delta, constant = 1)  
+
+
+bad <- loo_df2 %>% 
+  filter(abs(delta) > thr | signflip) %>%        # 1차 필터
+  arrange(desc(abs(delta))) %>%                  # 영향력 큰 순
+  filter(w.weights > 0.05 | pre_rmspe > median(pre_rmspe))  # 추가 기준
+
+bad
+bad %>% pull(donor_id) %>% toString()
+```
+
+
+#------------------------
+#in_time_placebo
+#------------------------
+
+
+
+```{r}
+library(beepr)
+library(Synth)
+
+options(scipen = 999)
+
+## ─────────────────────────────────────────────────────────
+## 1. 도너 풀 확정 (treat_id 제외)
+## ─────────────────────────────────────────────────────────
+donor_ids_final <- df_scm %>% 
+  filter(unit_id >= 15, !unit_id %in% c(15, 31)) %>% 
+  distinct(unit_id) %>% 
+  pull(unit_id)
+
+## ─────────────────────────────────────────────────────────
+## 2. dataprep
+## ─────────────────────────────────────────────────────────
+dp_in_time <- do.call(
+  dataprep,
+  list(
+    foo                   = as.data.frame(df_scm),
+    predictors            = good_preds_o,
+    predictors.op         = "mean",
+    special.predictors    = sp_2_in_time,   # 반드시 1~20주만 포함
+    dependent             = "traffic",
+    unit.variable         = "unit_id",
+    unit.names.variable   = "unit_name_en",
+    time.variable         = "week_index",
+    treatment.identifier  = treat_id,
+    controls.identifier   = donor_ids_final,
+    time.predictors.prior = 1:20,           # ← n_pre = 20
+    time.optimize.ssr     = 1:20,
+    time.plot             = 1:70            # ← n_all = 70
+  )
+)
+
+so_in_time <- synth(dp_in_time)
+
+## ─────────────────────────────────────────────────────────
+## 3. GAP 계산
+## ─────────────────────────────────────────────────────────
+gaps_in_time <- dp_in_time$Y1plot -
+                drop(dp_in_time$Y0plot %*% so_in_time$solution.w)
+
+## ─────────────────────────────────────────────────────────
+## 4. 그래프
+## ─────────────────────────────────────────────────────────
+path.plot(
+  synth.res    = so_in_time,
+  dataprep.res = dp_in_time,
+  Main         = paste0("In-Time Placebos – ", road_lbl),
+  Ylab         = "Weekly traffic",
+  Xlab         = "Week",
+  Legend       = legend_lbl,
+  Legend.position = "bottomright"
+)
+abline(v = 21, lty = 2)  # 20주 이후(정책선)
+
+text(
+  x     = 21,
+  y     = par("usr")[3] + 0.75 * diff(par("usr")[3:4]),
+  labels= "CCC launch  \n(counterfactual) \n2023-06-19 → 
+
+",
+  adj   = 1, cex = 0.75, xpd = TRUE
+)
+
+gaps.plot(
+  synth.res    = so_in_time,
+  dataprep.res = dp_in_time,
+  Ylab         = "Gap",
+  Xlab         = "Week"
+)
+abline(v = 21, lty = 2)
+
+## ─────────────────────────────────────────────────────────
+## 5. RMSPE · ATT
+## ─────────────────────────────────────────────────────────
+pre_rmspe_in_time  <- sqrt(mean(gaps_in_time[1:20]^2))
+post_rmspe_in_time <- sqrt(mean(gaps_in_time[21:70]^2))
+ratio_in_time      <- post_rmspe_in_time / pre_rmspe_in_time
+
+att_pct1in_time <- mean(gaps_in_time[21:70])
+
+baseline_prein_time <- df_scm %>% 
+  filter(unit_id == treat_id, week_index <= 20) %>% 
+  summarise(pre_mean = mean(traffic, na.rm = TRUE)) %>% 
+  pull(pre_mean)
+
+eff_final1in_time <- (att_pct1in_time / baseline_prein_time) * 100
+
+cat(sprintf(
+  "\n▶ Final RMSPE | Pre = %.3f   Post = %.3f   Ratio = %.3f | ATT = %.3f | ATT/Pre = %.3f%%",
+  pre_rmspe_in_time, post_rmspe_in_time, ratio_in_time,
+  att_pct1in_time,    eff_final1in_time
+))
+
+goal_v1in_time <- baseline_prein_time * 0.19775
+
+cat(sprintf(
+  "\n▶ Traffic before treat = %.3f   Expected traffic = %.3f   diff = %.3f",
+  baseline_prein_time, goal_v1in_time, abs(goal_v1in_time - att_pct1in_time)
+))
+
+## ─────────────────────────────────────────────────────────
+## 6. 가중치 테이블
+## ─────────────────────────────────────────────────────────
+stab_in_time <- synth.tab(
+  dataprep.res = dp_in_time,
+  synth.res    = so_in_time,
+  round.digit  = 10
+)
+weights_final_tbl_in_time <- stab_in_time$tab.w %>% 
+  arrange(desc(w.weights))
+print(weights_final_tbl_in_time, row.names = FALSE)
+
+beep(5)            # 완료 알림
+```
+
+
+
+
+##restricting the donor pool to units with similar values in the predictors
+#========================================
+
+```{r}
+library(dplyr)
+library(tibble)
+library(Synth)
+
+# — (A) 정책 이후만 쓴 predictor 테이블 —
+pred_tbl_post <- df_scm %>%
+  filter(unit_id %in% c(donor_ok_ids, treat_id),
+         week_index > n_pre) %>%
+  group_by(unit_id) %>%
+  summarise(
+    across(c(all_of(good_preds_o), traffic, speed),
+           ~ median(.x, na.rm = TRUE))
+  ) %>%
+  ungroup()
+
+# — (B) 거리 계산용 행렬 & 벡터 —
+unit_ids <- pred_tbl_post$unit_id
+X_mat    <- pred_tbl_post %>% select(-unit_id) %>% as.matrix()
+treat_vec<- pred_tbl_post %>%
+              filter(unit_id == treat_id) %>%
+              select(-unit_id) %>%
+              as.numeric()
+
+dists <- apply(X_mat, 1, function(x) sqrt(sum((x - treat_vec)^2)))
+
+dist_df <- tibble(unit_id = unit_ids, dist = dists) %>%
+  arrange(dist) %>%
+  filter(unit_id != treat_id)
+
+# — (C) Decile 분위수에 따른 K_list (10%,20%,…100%) —
+qs     <- quantile(dist_df$dist, probs = seq(0.1, 1, by = 0.1), na.rm = TRUE)
+K_list <- sapply(qs, function(q) max(which(dist_df$dist <= q)))
+
+# 결과 확인
+print(K_list)
+
+# — (D) 10% 단위(decile) 그룹 컬럼 (필요 시) —
+dist_df_q <- dist_df %>%
+  mutate(
+    decile = ntile(dist, 10),
+    decile = factor(decile, levels = 1:10,
+                    labels = paste0(seq(0, 90, 10), "-", seq(10, 100, 10), "%"))
+  )
+
+# — (E) safe_synth 래퍼 (실패 시 NULL 리턴) —
+safe_synth <- function(dp_obj) {
+  tryCatch(synth(dp_obj),
+           error = function(e) {
+             warning("⚠ synth() failed: ", e$message)
+             NULL
+           })
+}
+
+# — (F) K_list 순회하면서 SCM 실행 & 결과 수집 —
+results <- tibble(K = integer(), pre_RMSPE = double(), post_RMSPE = double(), ratio = double())
+
+orig_preds <- dp_params$predictors    # 원래 쓰시던 predictors 리스트
+
+for (K in K_list) {
+  controls_k <- head(dist_df$unit_id, K)
+  
+  # 1) 분산이 0인 predictor 자동 제거
+  vars <- sapply(orig_preds, function(p) {
+    vals <- pred_tbl_post %>% filter(unit_id %in% controls_k) %>% pull(!!sym(p))
+    var(vals, na.rm = TRUE)
+  })
+  preds_ok <- orig_preds[vars > 0]
+  if (length(preds_ok) == 0) {
+    warning("모든 predictor가 상수입니다. K=", K, " 건너뜁니다.")
+    next
+  }
+  
+  # 2) dataprep 인자 덮어쓰기
+  dp_args <- modifyList(dp_params, list(
+    controls.identifier = controls_k,
+    predictors           = preds_ok
+  ))
+  dp_k <- do.call(dataprep, dp_args)
+  
+  # 3) synth 호출 (실패해도 루프 계속)
+  so_k <- safe_synth(dp_k)
+  if (is.null(so_k)) next
+  
+  # 4) gap 계산 및 RMSPE
+  gaps_k  <- dp_k$Y1plot - dp_k$Y0plot %*% so_k$solution.w
+  pre_k   <- sqrt(mean(gaps_k[1:n_pre       ]^2, na.rm = TRUE))
+  post_k  <- sqrt(mean(gaps_k[(n_pre+1):n_all]^2, na.rm = TRUE))
+  
+  # 5) 결과 수집
+  results <- results %>%
+    add_row(K = K, pre_RMSPE = pre_k, post_RMSPE = post_k, ratio = post_k / pre_k)
+}
+
+print(results)
+```
+
+```{r}
+filtered_one <- dist_df_q[1:47,] %>% pull(unit_id)
+```
+
+
+
+#결과 값으로 SCM 다시 돌리기.
+#=====================
+
+#SCM 루프, 기여도가 낮은 것을 하나씩 빼면서, rmspe가 낮은채로 도너풀을 최대한 줄여본다.
+#=====================
+
+```{r}
+library(Synth)
+library(dplyr)
+
+# — 0. 파라미터 설정 —
+treat_id   <- 42
+max_rmspe  <- 535
+available_ids <- filtered_one   # 초기 도너 풀
+
+# — 1. 공통 dataprep 파라미터 —
+common_dp_params <- list(
+  foo                   = as.data.frame(df_scm),
+  predictors            = good_preds_new,
+  predictors.op         = "mean",
+  special.predictors    = sp_2_all,  #sp_all_1wk,
+  dependent             = "traffic",
+  unit.variable         = "unit_id",
+  unit.names.variable   = "unit_name",
+  time.variable         = "week_index",
+  treatment.identifier  = treat_id,
+  time.predictors.prior = 1:n_pre,
+  time.optimize.ssr     = 1:n_pre,
+  time.plot             = 1:n_all
+)
+
+# — 2. 결과 저장용 tibble 초기화 —
+results_tbl <- tibble(
+  iter        = integer(),
+  n_donors    = integer(),
+  pre_rmspe   = double(),
+  post_rmspe  = double(),
+  removed_id  = integer(),
+  rate        = double()       # ← 여기
+)
+
+
+# — 3. 반복 실행 —
+iteration <- 0
+repeat {
+  iteration <- iteration + 1
+
+  # 3-1) dataprep with current donor pool
+  params_current <- modifyList(common_dp_params,
+                                list(controls.identifier = available_ids))
+  dp_current <- do.call(dataprep, params_current)
+
+  # 3-2) 합성대조군 적합
+  synth_current <- synth(data.prep.obj = dp_current)
+
+  # 3-3) 간극 계산
+  gaps_current <- dp_current$Y1plot - (dp_current$Y0plot %*% synth_current$solution.w)
+
+  # 3-4) pre/post RMSPE 계산
+  pre_rmspe_val  <- sqrt(mean(gaps_current[1:n_pre]^2, na.rm = TRUE))
+  post_rmspe_val <- sqrt(mean(gaps_current[(n_pre+1):n_all]^2, na.rm = TRUE))
+
+
+  # 3-5) 가장 작은 가중치 도너 한 명 선택
+  stab_current   <- synth.tab(dataprep.res = dp_current, synth.res = synth_current)
+  remove_id      <- stab_current$tab.w %>%
+                      arrange(w.weights) %>%
+                      slice(1) %>%
+                      pull(unit.numbers)
+
+  # 3-6) 결과 기록
+results_tbl <- results_tbl %>%
+  add_row(
+    iter       = iteration,
+    n_donors   = length(available_ids),
+    pre_rmspe  = pre_rmspe_val,
+    post_rmspe = post_rmspe_val,
+    removed_id = remove_id,
+    rate       = post_rmspe / pre_rmspe     # ← 계산된 rate
+  )
+
+  message(
+    "Iter ", iteration,
+    " | pre-RMSPE=", round(pre_rmspe_val,2),
+    " post-RMSPE=", round(post_rmspe_val,2),
+    " | removed: ", remove_id
+  )
+
+  # — 3-7) 중단 조건 —
+  if (pre_rmspe_val > max_rmspe) {
+    message("Stopping: pre-RMSPE > ", max_rmspe)
+    break
+  }
+  if (length(remove_id) == 0) {
+    message("Stopping: no more donors to remove")
+    break
+  }
+
+  # 3-8) 도너 풀에서 제거
+  available_ids <- setdiff(available_ids, remove_id)
+}
+
+# — 4. 최종 결과 —
+print(results_tbl)
+
+```
+
+
+# 도너를 땠을 때 가장 ratio가 높은 때가 언젠지 확인한다. 
+#=====================
+```{r}
+library(dplyr)
+
+# 1) rate 컬럼 추가
+results_with_rate <- results_tbl %>%
+  mutate(rate = post_rmspe / pre_rmspe)
+
+# 2) rate 내림차순으로 정렬해서 확인
+results_with_rate %>%
+  arrange(desc(rate)) %>%
+  print(n = Inf)
+
+# 3) 가장 rate가 높은 “한 줄”만 보고 싶다면
+top_rate_row <- results_with_rate %>%
+  slice_max(rate, n = 1)
+
+top_rate_number <- results_with_rate %>%
+  slice_max(rate, n = 1) %>% pull(iter)
+
+print(top_rate_row)
+
+removable_ids <- results_tbl %>% filter(iter >= 1 & iter<= top_rate_number) %>% pull(removed_id)
+
+```
+
+
+#second scm을 진행한다. 위에서 나온 값을 빼고 진행한다.
+#=====================
+```{r}
+library("beepr")
+library(Synth)
+
+options(scipen = 999)
+
+donor_ok_ids
+
+
+length(donor_ok_ids)
+
+treat_id <- 41
+
+
+good_preds <- c("lanes.min", "speed.max", "local_share", "local_length_km") #c("lanes.min", "local_length_km", "total_length_km","speed.min", "speed.max" , "lanes.max")
+
+#
+
+good_preds_o <- c("lanes.min","local_length_km","total_length_km", "speed.max", "lanes.max", "speed.min", "local_share")
+
+good_preds_new <- c("lanes.max", "speed.max","local_share", "total_length_km")
+
+# (4) 아주 작은 잡음 추가 (jitter) — scale 대비 매우 작은 sd
+set.seed(42)
+df_scm_jittered <- df_scm %>%
+  mutate(across(all_of(good_preds_new),
+                ~ .x + rnorm(n(), mean = 0, sd = 1e-7)))
+
+##########################
+dp_params <- list(
+  foo                     = as.data.frame(df_scm),
+  predictors              = good_preds_new,
+  predictors.op           = "mean",
+  special.predictors      = sp_2_all, #, #sp_all_1wk, # sp_2_all,
+  dependent               = "traffic",
+  unit.variable           = "unit_id",
+  unit.names.variable     = "unit_name",
+  time.variable           = "week_index",
+  treatment.identifier    = treat_id,          # 실제 처리군 ID
+  controls.identifier     = donor_ok_ids,    # 정제된 donor IDs
+  time.predictors.prior   = 1:n_pre,
+  time.optimize.ssr       = 1:n_pre,
+  time.plot               = 1:n_all
+)
+
+
+# 3-1) dataprep with refined donor pool
+dp_refined <- do.call(dataprep, dp_params)
+
+
+
+# 3-3) ipop 기반 합성대조군 적합
+so_refined <- synth(data.prep.obj = dp_refined)
+
+
+############################################################################
+## 3. 효과(gap) 계산 & 그림
+############################################################################
+gaps_main <- dp_refined$Y1plot - (dp_refined$Y0plot %*% so_refined$solution.w)
+
+# ── 공통 변수 ──────────────────────────────────────────────────────────
+week_all  <- dp_refined$tag$time.plot              # 1,2,3,… 전체 주차
+lab_major <- c(1, seq(5, max(week_all), by = 5)) # 1,5,10,15,… 원하는 레이블
+
+
+
+# ── 1) 궤적(Path) 플롯 ──────────────────────────────────────────────────
+
+#===gap
+# 0. 결과 그림 -------------------------------------------------------------
+path.plot(
+  synth.res    = so_refined,
+  dataprep.res = dp_refined,
+  Ylab = "Weekly traffic",
+  Xlab = "Week",
+  Legend = c("Treated","Synthetic"),
+  Legend.position = "bottomright"
+)
+
+# 1. 회색 격자선 -----------------------------------------------------------
+abline(v = week_all, col = "grey90", lty = "dotted")
+
+# 2. 이벤트 정의  ← 여기만 바꾸면 됨! --------------------------------------
+event_pos <- c(n_pre + 1)        # x 좌표
+event_lty <- c(2)        # 선 종류
+event_lab <- c("CCC launch")
+
+# 3. 선 + 레이블 -----------------------------------------------------------
+# (A) 수직선
+mapply(abline, v = event_pos, lty = event_lty)
+
+# (B) 레이블 – 선 바로 아래, 가로 글씨
+y_lab <- par("usr")[3] + diff(par("usr")[3:4]) * 0.05   # y축 최저값에서 5 % 위
+text(event_pos, y_lab,
+     labels = event_lab,
+     cex = 0.75,          # 글씨 크기
+     adj = c(0.5, 1),     # 가운데·아래 정렬
+     xpd = TRUE)
+
+# 4. x축 눈금 (굵은 눈금만 표시) ------------------------------------------
+axis(1, at = axTicks(1), labels = FALSE)              # 기본 눈금 숨기고
+axis(1, at = lab_major, labels = lab_major,           # 주요 눈금만 다시
+     las = 1, cex.axis = 0.8)
+
+
+
+#===gap
+############################################################################
+# 0. 결과 그림 -------------------------------------------------------------
+gaps.plot(
+  synth.res    = so_refined,
+  dataprep.res = dp_refined,
+  Ylab = "Gap",
+  Xlab = "Week"
+)
+
+# 1. 회색 격자선 -----------------------------------------------------------
+abline(v = week_all, col = "grey90", lty = "dotted")
+
+# 2. 이벤트 정의  ← 여기만 바꾸면 됨! --------------------------------------
+event_pos <- c(n_pre + 1)        # x 좌표
+event_lty <- c(2)        # 선 종류
+event_lab <- c("CCC launch")
+
+# 3. 선 + 레이블 -----------------------------------------------------------
+# (A) 수직선
+mapply(abline, v = event_pos, lty = event_lty)
+
+# (B) 레이블 – 선 바로 아래, 가로 글씨
+y_lab <- par("usr")[3] + diff(par("usr")[3:4]) * 0.05   # y축 최저값에서 5 % 위
+text(event_pos, y_lab,
+     labels = event_lab,
+     cex = 0.75,          # 글씨 크기
+     adj = c(0.5, 1),     # 가운데·아래 정렬
+     xpd = TRUE)
+
+# 4. x축 눈금 (굵은 눈금만 표시) ------------------------------------------
+axis(1, at = axTicks(1), labels = FALSE)              # 기본 눈금 숨기고
+axis(1, at = lab_major, labels = lab_major,           # 주요 눈금만 다시
+     las = 1, cex.axis = 0.8)
+
+############################################################################
+## 3-bis. 사전·사후 RMSPE 및 Ratio 계산  ← ★ 추가
+############################################################################
+pre_rmspe  <- sqrt(mean(gaps_main[ 1:n_pre            ]^2))
+post_rmspe <- sqrt(mean(gaps_main[ (n_pre+1):n_all    ]^2))
+ratio_main <- post_rmspe / pre_rmspe
+
+att_pct <- mean(gaps_main[(n_pre+1):n_all])      # %-point ATT
+
+baseline_pre <- df_scm %>%
+  filter(
+    unit_id    == treat_id,   # 처리 대상 도로 ID
+    week_index <= n_pre             # 개입 이전 주(week)만
+  ) %>%
+  summarise(pre_mean = mean(traffic, na.rm = TRUE)) %>%
+  pull(pre_mean)
+
+eff_final <- (att_pct/baseline_pre)*100
+
+cat(sprintf(
+  "\n▶ Final RMSPE | Pre = %.3f   Post = %.3f   Ratio = %.3f | ATT = %.3f |ATT ratio =%.3f ",
+  pre_rmspe, post_rmspe, ratio_main, att_pct, eff_final
+))
+
+goal_v <- baseline_pre*0.19775
+
+cat(sprintf(
+  "\n▶ Traffic before treat = %.3f   Expected traffic = %.3f  diff = %.3f",
+  baseline_pre, goal_v , abs(goal_v-att_pct)
+))
+
+# 4) 절대 단위 궤적
+
+############################################################################
+# 0. 기본 그래프 ----------------------------------------------------------
+plot(Y1_abs, type = "l", lwd = 2,
+     xlab = "Week", ylab = "Traffic (vehicles / day)",
+     ylim = range(c(Y1_abs, Y0_abs), na.rm = TRUE))
+lines(Y0_abs, lwd = 2, lty = 2)
+
+# 1. 회색 1주 격자 --------------------------------------------------------
+abline(v = week_all, col = "grey90", lty = "dotted")
+
+# 2. ‘정책·이벤트’ 정의 ---------------------------------------------------
+event_pos <- c(n_pre + 1,  61, 74, 80, 96)        # x 좌표
+event_lty <- c(2,         3,  5,  6,  5)        # 선 종류
+event_lab <- c("CCC\nlaunch",          # 2줄!
+               "Include\nGimpo",
+               "Youth\ndiscount",
+               "Include\nNamyang",
+               "Include\nGwacheon")
+
+# 3. 수직선 + 레이블 ------------------------------------------------------
+# (A) 수직선
+invisible( mapply(abline, v = event_pos, lty = event_lty) )
+
+# (B) 레이블 : 선 바로 아래 5 % 지점, 가로
+y_lab <- par("usr")[3] + diff(par("usr")[3:4]) * 0.05
+text(event_pos, y_lab,
+     labels = event_lab,
+     cex = 0.75,          # 글씨 크기
+     adj = c(0.5, 1),     # 가운데·아래 정렬
+     xpd = TRUE)
+
+# 4. 범례 ---------------------------------------------------------------
+legend("topright", legend = c("Treated", "Synthetic"),
+       lwd = 2, lty = c(1, 2), bty = "n")
+
+
+
+
+# 깨끗한 버전
+path.plot(synth.res   = so_refined,
+          dataprep.res= dp_refined,
+          Ylab = "Weekly traffic", Xlab = "Week",
+          Legend = c("Treated","Synthetic"),
+          Legend.position = "bottomright")
+abline(v = n_pre + 1, lty = 2)               # 정책선
+
+gaps.plot(synth.res   = so_refined,
+          dataprep.res= dp_refined,
+          Ylab = "Gap", Xlab = "Week")
+abline(v = n_pre + 1, lty = 2)
+
+
+
+# 4️⃣ 가중치·밸런스 (정리 버전)
+syn_fix <- so_refined
+syn_fix$solution.v <- as.numeric(syn_fix$solution.v)
+
+stab <- synth.tab(dataprep.res = dp_refined,
+                  synth.res   = so_refined,
+                  round.digit = 10)
+
+# 도너 가중치 테이블 한 번만 생성
+weights_tbl_t <- stab$tab.w %>%
+  arrange(desc(w.weights))
+
+print(weights_tbl_t, row.names = FALSE)
+
+
+
+cat(sprintf(
+  "\n▶ Baseline RMSPE  |  Pre = %.3f   Post = %.3f   Ratio = %.3f\n",
+  pre_rmspe, post_rmspe, ratio_main
+))
+
+
+
+```
+
+
+#갭 그래프 눈으로 확인한다 
+
+#=====================
+
+```{r}
+library(plotly)
+
+# 1) gaps 계산
+gaps  <- as.numeric(dp_refined$Y1plot - (dp_refined$Y0plot %*% so_refined$solution.w))
+
+# 2) x축으로 쓸 주(week) 벡터
+#    만약 날짜/연속인덱스가 없다면 1:length(gaps) 로 대체해도 됩니다.
+weeks <- dp_refined$tag$time.plot  
+
+# 3) Plotly로 선 그래프 그리기
+fig <- plot_ly(
+  x    = ~weeks,
+  y    = ~gaps,
+  type = "scatter",
+  mode = "lines",
+  name = "Gap"
+) %>%
+  # 4) 처리시점(vertical line) 추가
+  add_segments(
+    x     = ~weeks[n_pre + 1],
+    xend  = ~weeks[n_pre + 1],
+    y     = min(gaps, na.rm=TRUE),
+    yend  = max(gaps, na.rm=TRUE),
+    line  = list(dash = "dash", color = "black"),
+    showlegend = FALSE
+  ) %>%
+  # 5) 레이아웃 설정
+  layout(
+    xaxis = list(title = "Week"),
+    yaxis = list(title = "Gap"),
+    legend = list(orientation = "h", x = 0.1, y = 1.1)
+  )
+
+# 6) 출력
+fig
+```
+
+#pre-period 교통량과 도너 갯수 확인한다
+#=====================
+```{r}
+baseline_pre <- df_scm %>%
+  filter(
+    unit_id    == treat_id,   # 처리 대상 도로 ID
+    week_index <= n_pre             # 개입 이전 주(week)만
+  ) %>%
+  summarise(pre_mean = mean(traffic, na.rm = TRUE)) %>%
+  pull(pre_mean) %>% print()
+
+
+length(donor_ok_ids)
+ #792.460
+```
+
+#플라시보
+
+#=====================
+
+
+```{r}
+# 1️⃣ SCtools 로드
+library(SCtools)
+# dp_final, so_final 은 앞서 만든 최종 dataprep & synth 결과입니다.
+
+# 2️⃣ placebo 합성대조군 생성
+#    - Sigf.ipop: ipop 최적화 정밀도 (기본 5)
+#    - strategy: "sequential" 또는 병렬 "multiprocess"
+placebos <- generate.placebos(
+  dataprep.out = dp_refined,
+  synth.out    = so_refined,
+  Sigf.ipop    = 1,
+  strategy     = "sequential"
+)  
+# → 반환값(placebos)은 tdf 객체로, 원본 처리군과 각 placebo의 Y & Y_synth 시계열, 
+#    사전 MSPE(mspe.placs) 등을 담고 있습니다  
+
+# 3️⃣ placebo 분포 플롯
+#    - plot_placebos(): 모든 placebo gap + 처리군 gap을 일괄 시각화
+plot_placebos(placebos)  
+
+# 4️⃣ MSPE test (p-value 계산)
+test_out <- mspe.test(placebos)
+cat("▶ Final p-value =", round(test_out$p.val, 3), "\n")  
+
+beep(5)
+
+```
+
+```{r}
+# 3️⃣ placebo 갭 플롯 (gap over time)
+plot_placebos(
+  placebos,
+  discard.extreme = TRUE,   # 컷 적용
+  mspe.limit      = 5       # treated MSPE × 5
+)
+
+# 4️⃣ p-value 계산 (MSPE test)
+test_out <- mspe.test(
+  placebos,
+  discard.extreme = TRUE,
+  mspe.limit      = 5
+)
+cat("▶ Final p-value =", round(test_out$p.val, 3), "\n")
+
+# 5️⃣ MSPE ratio 히스토그램
+mspe.plot(
+  placebos,
+  discard.extreme = TRUE,
+  mspe.limit      = 5,
+  plot.hist       = TRUE    # 필요 시 FALSE: dotplot
+  
+)
+
+
+# 5️⃣ MSPE ratio 분포 플롯
+#    - mspe.plot(): post/pre-period MSPE ratio 를 히스토그램으로
+mspe.plot(placebos, discard.extreme = TRUE, mspe.limit = 5)
+```
+
+##handmade placebo
+
+```{r}
+
+library(beepr)
+# ───────────────────────────────────────────────────────────
+# define “safe” wrappers around dataprep() and synth()
+# so that any failure just returns NULL instead of stopping
+# ───────────────────────────────────────────────────────────
+safe_dp <- function(arg) {
+  tryCatch(
+    do.call(dataprep, arg),
+    error = function(e) {
+      warning("⚠ dataprep() failed for treatment ", arg$treatment.identifier, ": ", e$message)
+      NULL
+    }
+  )
+}
+safe_synth <- function(dp) {
+  tryCatch(
+    synth(dp),
+    error = function(e) {
+      warning("⚠ synth() failed: ", e$message)
+      NULL
+    }
+  )
+}
+
+# now your placebo loop can find safe_dp() / safe_synth()
+############################################################################
+## 0. 도너 벡터 & placebo_ids 확정
+############################################################################
+donor_ok_ids <- donor_ok_ids        # 또는 donor_ok_ids_filtered
+placebo_ids  <- setdiff(donor_ok_ids, treat_id)
+
+############################################################################
+## 1. placebo 루프
+############################################################################
+store <- matrix(NA_real_, nrow = n_all, ncol = length(placebo_ids))
+colnames(store) <- df_scm$unit_name[match(placebo_ids, df_scm$unit_id)]
+bad_ids <- integer()
+
+for (i in seq_along(placebo_ids)) {
+  id  <- placebo_ids[i]
+  arg <- modifyList(dp_params, list(
+           treatment.identifier = id,
+           controls.identifier  = setdiff(placebo_ids, id)
+         ))
+    dp_p  <- safe_dp(arg);   if (is.null(dp_p)) next
+    so_p  <- safe_synth(dp_p); if (is.null(so_p)) next
+
+   store[, i] <- dp_p$Y1plot - dp_p$Y0plot %*% so_p$solution.w
+}
+
+## (optional) drop any that failed completely
+if (length(bad_ids <- setdiff(placebo_ids, colnames(store)))) {
+  message("⚠ synth() 실패: ", paste(bad_ids, collapse = ", "))
+  keep        <- colnames(store)
+  placebo_ids <- placebo_ids[placebo_ids %in% keep]
+  store       <- store[, keep, drop = FALSE]
+}
+
+stopifnot(ncol(store) > 0)
+
+
+beep(5)
+```
+
+# 플라시보 플롯 그린다.
+#=====================
+```{r}
+exclude_ids <- c()
+cut.off <-
+# ───────────────────────────────────────────────────────────
+# 1) 처리군 gap (기존)
+gap_treated <- as.numeric(dp_refined$Y1plot - (dp_refined$Y0plot %*% so_refined$solution.w))
+
+# 1️⃣ pre-period MSPE 계산 & 5배 컷
+## 1) pre-MSPE 컷
+mspe_placebo <- colMeans(store[1:n_pre, , drop=FALSE]^2, na.rm=TRUE)
+ref_mspe     <- mean(gap_treated[1:n_pre]^2)
+keep_units   <- names(mspe_placebo)[ mspe_placebo <= ref_mspe * cut.off ]
+
+## 2) 컷오프 덮어쓰기 금지!
+
+## 3) store5 생성 (열 이름 그대로 유지)
+store5 <- store[, keep_units, drop = FALSE]
+stopifnot(ncol(store5) > 0)  # 최소 한 개 이상의 플라시보가 남아야 함
+
+## 4) plotly용 데이터 변환
+all_gaps <- cbind(Treated = gap_treated, store5)
+df_plot  <- as_tibble(all_gaps) %>%
+  mutate(Time = row_number()) %>%
+  pivot_longer(-Time, names_to = "Unit", values_to = "Gap")
+
+
+
+# 색상 팔레트
+library(RColorBrewer)
+placebo_units <- setdiff(unique(df_plot$Unit), "Treated")
+base_pal  <- brewer.pal(min(8, length(placebo_units)), "Set2")
+pal_extra <- colorRampPalette(base_pal)(length(placebo_units))
+pal       <- c("Treated" = "black", setNames(pal_extra, placebo_units))
+
+# plotly
+library(plotly)
+fig <- plot_ly(
+  df_plot,
+  x      = ~Time,
+  y      = ~Gap,
+  color  = ~Unit,
+  colors = pal,
+  hoverinfo = "text",
+  text   = ~sprintf("%s<br>Week %d<br>Gap %.1f", Unit, Time, Gap)
+) %>%
+  add_lines() %>%
+  layout(
+    title = "Treated vs Placebo Gaps\n(MSPE ≤ 5× & exclude_ids 제외)",
+    shapes = list(list(
+      type = "line",
+      x0   = n_pre + 1, x1 = n_pre + 1,
+      y0   = min(df_plot$Gap, na.rm = TRUE),
+      y1   = max(df_plot$Gap, na.rm = TRUE),
+      line = list(dash = "dash", color = "black")
+    )),
+    xaxis = list(title = "Week"),
+    yaxis = list(title = "Gap")
+  ) %>%
+  config(displaylogo = FALSE)
+
+fig
+```
+
+
+```{r}
+
+# ───────────────────────────────────────────────────────────
+# Final SCM: p-value 계산 및 히스토그램
+# ───────────────────────────────────────────────────────────
+
+# ───────────────────────────────────────────────────────────
+# Final SCM: p-value 계산, 히스토그램 및 세로 Dot Chart
+# ───────────────────────────────────────────────────────────
+
+library(dplyr)
+library(ggplot2)
+
+# — 0) 사전(pre)·사후(post) 기간 길이 —
+# n_pre: 이미 정의된 개입 전 기간 길이
+# n_all: 전체 기간 길이
+# (n_all ← length(gaps_main) 또는 nrow(store))
+
+# — 1) Treated Unit의 Pre/Post RMSPE 비율 계산 —
+pre_rmspe_treated  <- sqrt(mean(gaps_main[   1:n_pre       ]^2, na.rm = TRUE))
+post_rmspe_treated <- sqrt(mean(gaps_main[(n_pre+1):n_all ]^2, na.rm = TRUE))
+ratio_treated      <- post_rmspe_treated / pre_rmspe_treated
+
+# — 2) Placebo Units의 Pre/Post RMSPE 비율 계산 —
+pre_rmspe_placebo  <- apply(store[   1:n_pre       , , drop = FALSE], 2,
+                             function(x) sqrt(mean(x^2, na.rm = TRUE)))
+post_rmspe_placebo <- apply(store[(n_pre+1):n_all , , drop = FALSE], 2,
+                             function(x) sqrt(mean(x^2, na.rm = TRUE)))
+ratio_placebo      <- post_rmspe_placebo / pre_rmspe_placebo
+
+# — 3) “pre-MSPE ≤ 5×treated pre-MSPE” 필터링 —
+threshold        <- cut.off * pre_rmspe_treated
+keep_idx         <- which(pre_rmspe_placebo <= threshold & !is.na(ratio_placebo))
+ratio_placebo_f  <- ratio_placebo[keep_idx]
+
+# — 4) Final p-value (one-sided) 계산 —
+p_value <- mean(ratio_placebo_f >= ratio_treated, na.rm = TRUE)
+cat(sprintf("▶ Final p-value = %.3f\n", p_value))
+
+# ───────────────────────────────────────────────────────────
+# A) Ratio 히스토그램
+# ───────────────────────────────────────────────────────────
+ggplot(data.frame(Ratio = ratio_placebo_f), aes(x = Ratio)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = ratio_treated, color = "red", linetype = "dashed", size = 1) +
+  annotate("text",
+           x = ratio_treated, y = Inf,
+           label = paste0("Treated\nRatio=", round(ratio_treated, 2)),
+           vjust = -0.5, hjust = 1.1, color = "red", size = 3) +
+  labs(
+    title    = "Placebo Post/Pre RMSPE Ratio Distribution",
+    subtitle = paste("Final p-value =", round(p_value, 3)),
+    x        = "Post/Pre RMSPE Ratio",
+    y        = "Count"
+  ) +
+  theme_minimal()
+
+# ───────────────────────────────────────────────────────────
+# B) 세로 Dot Chart
+# ───────────────────────────────────────────────────────────
+# (1) 데이터프레임 생성
+df_units <- bind_rows(
+  tibble(
+    unit = names(ratio_placebo_f),
+    ratio = as.numeric(ratio_placebo_f),
+    type  = "Placebo"
+  ),
+  tibble(
+    unit  = "Treated Unit",
+    ratio = ratio_treated,
+    type  = "Treated"
+  )
+) %>%
+  arrange(ratio) %>%
+  mutate(unit = factor(unit, levels = unit))
+
+# (2) 그리기
+ggplot(df_units, aes(x = ratio, y = unit, shape = type, color = type)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey") +
+  scale_shape_manual(values = c(Placebo = 17, Treated = 15)) +
+  scale_color_manual(values = c(Placebo = "black", Treated = "red")) +
+  labs(
+    title = paste0("Post/Pre RMSPE Ratio (Final SCM) — p=", round(p_value, 3)),
+    x     = "Post/Pre RMSPE Ratio",
+    y     = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y        = element_text(size = 6),
+    panel.grid.major.y = element_blank(),
+    plot.title         = element_text(face = "bold", hjust = 0.5)
+  )
+```
+
+#gap check
+
+```{r}
+
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# 1️⃣ 모든 시계열을 리스트로 준비
+#    Treated는 gap_treated, 플라시보는 store5 행렬
+gap_list <- c(
+  list(Treated = gap_treated),
+  as.list(as.data.frame(store5))
+)
+
+# 2️⃣ 단위별 RMSPE 계산 함수
+compute_rmspe <- function(gap_vec) {
+  pre  <- sqrt(mean(gap_vec[1:n_pre]^2,       na.rm = TRUE))
+  post <- sqrt(mean(gap_vec[(n_pre+1):n_all]^2, na.rm = TRUE))
+  tibble(
+    Pre_RMSPE  = pre,
+    Post_RMSPE = post,
+    Ratio      = post / pre
+  )
+}
+
+# 3️⃣ 모든 유닛에 적용하여 데이터프레임으로 결합
+rmspe_tbl <- imap_dfr(
+  gap_list,
+  ~ compute_rmspe(.x) %>% mutate(Unit = .y),
+  .id = NULL
+) %>%
+  select(Unit, Pre_RMSPE, Post_RMSPE, Ratio) %>%
+  arrange(Ratio)
+
+# 4️⃣ 결과 출력
+print(rmspe_tbl)
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# 1) Ratio > 2인 Unit 벡터
+units <- rmspe_tbl %>% 
+  filter(Ratio >3 ) %>% filter(!Unit %in% "Treated") %>%
+  pull(Unit)
+# [1] "281_한밭대로 하행_한밭대로"
+
+# 2) 앞 숫자만 추출
+ids_chr <- str_extract(units, "^[0-9]+")
+# 또는 베이스 R:
+# ids_chr <- sub("^(\\d+).*", "\\1", units)
+
+# 3) 정수로 변환
+ids_int <- toString(ids_chr)
+
+ids_int
+
+```
+
+#======================
+
+#check the deletable pools
+
+```{r}
+library(dplyr)
+
+# 이 기준으로 필터링한 unit_id
+
+
+units_high_rate <- as.vector(ids_int)
+
+units_gap_top10 <- weights_tbl_t %>%
+  filter(w.weights >= 0.01) %>%
+  pull(unit.numbers)
+
+units_overlap <- intersect(units_high_rate, units_gap_top10)
+
+
+# '높은 도로'에서 '뺄수 없는 도로'를 제외한 벡터 계산
+units_can_be_deleted <- (setdiff(units_high_rate, units_overlap))
+
+#deledted_clean <- sub("^ID_", "", units_can_be_deleted)
+
+# units_can_be_deleted 가 이미 계산되어 있다고 가정
+
+# 4) 결과를 "ID" 꼴로 따옴표+쉼표 형태로 한 번에 출력
+cat("rate높은 도로: ", paste((units_high_rate), collapse = ", "), "\n")
+cat("기여도 높은 도로: ", paste((units_gap_top10), collapse = ", "), "\n")
+cat("뺄 수 없는 도로: ", paste((units_overlap), collapse = ", "), "\n")
+cat("뺄 수 있는 도로: ", paste((units_can_be_deleted), collapse = ", "), "\n")
+
+# 5) 개수 확인
+cat("전체 후보 도로 수: ", length(donor_ok_ids), "\n")
+cat("삭제 가능한 도로 수: ",length(strsplit(units_can_be_deleted, ",\\s*")[[1]]), "\n")
+```
+
+#==================
+#### how_diff?
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+library(Synth)
+
+# 1) high-rate 도로 ID (정수 벡터 형태)
+high_rate_ids <- as.integer(strsplit(units_high_rate, ",\\s*")[[1]])
+
+# 2) leave-one-out 실험 함수 (에러 시 NULL 반환)
+compute_pre_rmspe_leave_one <- function(remove_id) {
+  tryCatch({
+    # (가) controls.identifier 에서 하나 빼기
+    new_controls <- setdiff(donor_ok_ids, remove_id)
+    
+    # (나) dataprep
+    dp_i <- do.call(dataprep,
+                    modifyList(dp_params, list(controls.identifier = new_controls)))
+    
+    # (다) synth
+    so_i <- synth(dp_i)
+    
+    # (라) gap 계산
+    gap_i <- dp_i$Y1plot - dp_i$Y0plot %*% so_i$solution.w
+    
+    # (마) pre-period RMSPE 계산
+    pre_i <- sqrt(mean(gap_i[1:n_pre]^2, na.rm = TRUE))
+    
+    # 성공 시 tibble 반환
+    tibble(
+      removed_id = remove_id,
+      pre_RMSPE  = pre_i
+    )
+  }, error = function(e) {
+    warning("⚠ Failed for remove_id=", remove_id, ": ", e$message)
+    NULL
+  })
+}
+
+# 3) 모든 ID에 적용
+results_tbl_compare <- map_dfr(high_rate_ids, compute_pre_rmspe_leave_one)
+
+# 4) baseline 과 비교
+baseline_pre <- sqrt(mean(gaps_main[1:n_pre]^2, na.rm = TRUE))
+results_tbl_compare <- results_tbl_compare %>%
+  mutate(
+    baseline_pre = baseline_pre,
+    diff         = pre_RMSPE - baseline_pre
+  ) %>%
+  arrange((diff))
+
+# 5) 결과 확인
+print(results_tbl_compare)
+
+removable_ids <- results_tbl_compare %>%
+  filter(diff < 10) %>%
+  arrange(removed_id) %>%    # removed_id 기준 오름차순
+  pull(removed_id) 
+```
+#========================
+#final scm
+
+```{r}
+library(beepr)
+library(Synth)
+
+options(scipen = 999)
+
+donor_ok_ids <- df_scm %>%
+  filter(unit_id >= 15)%>%
+  distinct(unit_id) %>%  # 고유값만
+  pull(unit_id)   
+
+
+n_all <- 70
+n_pre <- 50
+
+donor_ids_final <- donor_ok_ids 
+
+treat_id    <- 4
+predictors_final  <- c("lanes.min","local_length_km",
+                       "speed.max")
+
+good_preds_o <- c("lanes.min","local_length_km","total_length_km", "speed.max", "lanes.max", "speed.min", "local_share")
+
+good_preds_new <- c("lanes.max", "speed.max","local_share", "total_length_km")
+
+
+# 2️⃣ jitter 추가 (optional)
+
+
+# 3️⃣ final dataprep 파라미터
+dp_params_final <- list(
+  foo               = as.data.frame(df_scm),
+  predictors              = good_preds_new, 
+  predictors.op           = "mean",
+  special.predictors      = sp_2_all, #, #sp_all_1wk, # sp_2_all,
+  dependent               = "traffic",
+  unit.variable           = "unit_id",
+  unit.names.variable     = "unit_name",
+  time.variable           = "week_index",
+  treatment.identifier    = treat_id,
+  controls.identifier     = donor_ids_final,
+  time.predictors.prior   = 1:n_pre,
+  time.optimize.ssr       = 1:n_pre,
+  time.plot               = 1:n_all
+)
+
+# 4️⃣ final dataprep & synth
+dp_final <- do.call(dataprep, dp_params_final)
+so_final <- synth(dp_final)
+
+
+# 5️⃣ gap 계산
+gaps_final <- dp_final$Y1plot - (dp_final$Y0plot %*% so_final$solution.w)
+
+# 6️⃣ 시간 변수
+week_final      <- dp_final$tag$time.plot
+lab_major_final <- c(1, seq(5, max(week_final), by = 5))
+
+# 7️⃣ 궤적(Path) 플롯
+path.plot(
+  synth.res    = so_final,
+  dataprep.res = dp_final,
+  Ylab = "Weekly traffic",
+  Xlab = "Week",
+  Legend = c("Treated","Synthetic"),
+  Legend.position = "bottomright"
+)
+abline(v = week_final, col = "grey90", lty = "dotted")
+abline(v = n_pre + 1, lty = 2)
+text(n_pre + 1, par("usr")[3] + diff(par("usr")[3:4])*0.05,
+     labels = "Final CCC launch", cex=0.75, adj=c(0.5,1), xpd=TRUE)
+axis(1, at = lab_major_final, labels = lab_major_final, las=1, cex.axis=0.8)
+
+# 8️⃣ gap 플롯
+gaps.plot(
+  synth.res    = so_final,
+  dataprep.res = dp_final,
+  Ylab = "Gap",
+  Xlab = "Week"
+)
+abline(v = week_final, col = "grey90", lty = "dotted")
+abline(v = n_pre + 1, lty = 2)
+
+# 9️⃣ 사전·사후 RMSPE & Ratio
+pre_rmspe_final  <- sqrt(mean(gaps_final[1:n_pre]^2))
+post_rmspe_final <- sqrt(mean(gaps_final[(n_pre+1):n_all]^2))
+ratio_final      <- post_rmspe_final / pre_rmspe_final
+
+att_pct1 <- mean(gaps_final[(n_pre+1):n_all])      # %-point ATT
+
+baseline_pre <- df_scm %>%
+  filter(
+    unit_id    == treat_id,   # 처리 대상 도로 ID
+    week_index <= n_pre             # 개입 이전 주(week)만
+  ) %>%
+  summarise(pre_mean = mean(traffic, na.rm = TRUE)) %>%
+  pull(pre_mean)
+
+eff_final1 <- (att_pct1/baseline_pre)*100
+
+cat(sprintf(
+  "\n▶ Final RMSPE | Pre = %.3f   Post = %.3f   Ratio = %.3f | ATT = %.3f |ATT ratio =%.3f ",
+  pre_rmspe_final, post_rmspe_final, ratio_final, att_pct1, eff_final1
+))
+
+goal_v1 <- baseline_pre*0.19775
+
+cat(sprintf(
+  "\n▶ Traffic before treat = %.3f   Expected traffic = %.3f  diff = %.3f",
+  baseline_pre,  goal_v1, abs(goal_v1-att_pct1)
+))
+
+
+# 11️⃣ final 가중치 테이블
+stab_final <- synth.tab(dataprep.res = dp_final,
+                        synth.res   = so_final,
+                        round.digit = 10)
+weights_final_tbl <- stab_final$tab.w %>%
+  arrange(desc(w.weights))
+print(weights_final_tbl, row.names = FALSE)
+
+
+
+
+beep(5)  # 완료 알림
+```
+
+
+# ───────────────────────────────────────────────────────────
+# final placebo 실행
+# ───────────────────────────────────────────────────────────
+
+```{r}
+
+
+# 1️⃣ 라이브러리 로드
+library(beepr)
+library(Synth)
+
+# 2️⃣ 안전한 dataprep()/synth() 래퍼
+safe_dp_pb <- function(arg) {
+  tryCatch(do.call(dataprep, arg),
+           error = function(e) {
+             warning("⚠ dataprep failed for placebo ", arg$treatment.identifier, ": ", e$message)
+             NULL
+           })
+}
+safe_synth_pb <- function(dp) {
+  tryCatch(synth(dp),
+           error = function(e) {
+             warning("⚠ synth failed for placebo: ", e$message)
+             NULL
+           })
+}
+
+# 3️⃣ placebo 대상 ID 정의
+placebo_ids_final <- setdiff(donor_ids_final, treat_id)
+
+# 4️⃣ 결과 저장 행렬 초기화 (unit_id 문자열을 열 이름으로)
+store_final_pb <- matrix(
+  NA_real_,
+  nrow = n_all,
+  ncol = length(placebo_ids_final),
+  dimnames = list(NULL, as.character(placebo_ids_final))
+)
+
+# 5️⃣ 루프 돌며 gap 계산
+for (id_pb in placebo_ids_final) {
+  args_pb <- modifyList(dp_params_final, list(
+    treatment.identifier = id_pb,
+    controls.identifier  = setdiff(placebo_ids_final, id_pb)
+  ))
+  dp_pb <- safe_dp_pb(args_pb)
+  if (is.null(dp_pb)) next
+  
+  so_pb <- safe_synth_pb(dp_pb)
+  if (is.null(so_pb)) next
+  
+  store_final_pb[, as.character(id_pb)] <-
+    dp_pb$Y1plot - dp_pb$Y0plot %*% so_pb$solution.w
+}
+
+# 6️⃣ 완전히 실패(전부 NA)한 열 제거
+store_final_pb <- store_final_pb[, colSums(!is.na(store_final_pb)) > 0, drop = FALSE]
+if (ncol(store_final_pb) == 0) {
+  stop("⚠ 모든 플라시보가 실패했습니다. dp_params_final을 재점검하세요.")
+}
+
+beep(5)  # 완료 알림
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(plotly)
+library(RColorBrewer)
+
+# 1) 처리군 gap (최종)
+gap_treated_final <- as.numeric(gaps_final)
+
+# 2) pre-period MSPE 계산 & 5× 컷
+mspe_placebo_final <- colMeans(store_final_pb[1:n_pre, , drop = FALSE]^2, na.rm = TRUE)
+ref_mse_final      <- mean((gap_treated_final[1:n_pre])^2)
+keep_units_final  <- names(mspe_placebo_final)[mspe_placebo_final <= ref_mse_final * 5]
+
+# 3) 실제 존재하는 컬럼만
+keep_units_final <- intersect(keep_units_final, colnames(store_final_pb))
+
+# 4) (옵션) exclude_ids 제거하려면
+#exclude_names <- df_scm %>% 
+#  filter(unit_id %in% exclude_ids) %>% 
+#  pull(unit_name)
+
+#keep_units_final <- setdiff(keep_units_final, exclude_names)
+
+# 5) 최종 플라시보 행렬
+store5_final <- store_final_pb[, keep_units_final, drop = FALSE]
+
+# 6) Treated + Placebo 결합
+all_gaps_final <- cbind(
+  Treated    = gap_treated_final,
+  store5_final
+)
+n_time <- nrow(all_gaps_final)
+
+# 7) long 포맷 변환
+df_plot_final <- as_tibble(all_gaps_final) %>%
+  mutate(Week = 1:n_time) %>%
+  pivot_longer(
+    cols      = -Week,
+    names_to  = "unit_id",
+    values_to = "Gap"
+  ) %>%
+  left_join(
+    df_scm %>%
+      mutate(
+        unit_id  = as.character(unit_id),
+        treat_id = as.character(treat_id)
+      ) %>%
+      select(unit_id, unit_name, treat_id) %>%
+      distinct(),
+    by = "unit_id"
+  ) %>%
+  # NA인 unit_name을 "treatment"로 대체
+  mutate(
+    unit_name = if_else(is.na(unit_name), "treatment", unit_name)
+  )
+
+# 8) 색상 팔레트 준비
+placebo_units_final <- setdiff(unique(df_plot_final$unit_name), "treatment")
+base_pal_final      <- brewer.pal(min(8, length(placebo_units_final)), "Set2")
+pal_extra_final     <- colorRampPalette(base_pal_final)(length(placebo_units_final))
+pal_final           <- c("treatment" = "black",
+                         setNames(pal_extra_final, placebo_units_final))
+
+# 9) Plotly 그리기
+fig_final <- plot_ly(
+  df_plot_final,
+  x      = ~Week,
+  y      = ~Gap,
+  color  = ~unit_name,
+  colors = pal_final,
+  hoverinfo = "text",
+  text   = ~sprintf("%s<br>Week %d<br>Gap %.1f", unit_name, Week, Gap)
+) %>%
+  add_lines() %>%
+  layout(
+    title = "Treated vs Final Placebo Gaps\n(MSPE ≤ 5× & exclude_ids 제외)",
+    shapes = list(list(
+      type = "line",
+      x0   = n_pre + 1, x1 = n_pre + 1,
+      y0   = min(df_plot_final$Gap, na.rm = TRUE),
+      y1   = max(df_plot_final$Gap, na.rm = TRUE),
+      line = list(dash = "dash", color = "black")
+    )),
+    xaxis = list(title = "Week"),
+    yaxis = list(title = "Gap")
+  ) %>%
+  config(displaylogo = FALSE)
+
+fig_final
+```
+
+
+#SCtools placebo
+
+```{r}
+# 1️⃣ SCtools 로드
+library(SCtools)
+# dp_final, so_final 은 앞서 만든 최종 dataprep & synth 결과입니다.
+
+# 2️⃣ placebo 합성대조군 생성
+#    - Sigf.ipop: ipop 최적화 정밀도 (기본 5)
+#    - strategy: "sequential" 또는 병렬 "multiprocess"
+placebos <- generate.placebos(
+  dataprep.out = dp_final,
+  synth.out    = so_final,
+  Sigf.ipop    = 5,
+  strategy     = "sequential"
+)  
+# → 반환값(placebos)은 tdf 객체로, 원본 처리군과 각 placebo의 Y & Y_synth 시계열, 
+#    사전 MSPE(mspe.placs) 등을 담고 있습니다  
+
+# 3️⃣ placebo 분포 플롯
+#    - plot_placebos(): 모든 placebo gap + 처리군 gap을 일괄 시각화
+plot_placebos(placebos)  
+
+# 4️⃣ MSPE test (p-value 계산)
+test_out <- mspe.test(placebos)
+cat("▶ Final p-value =", round(test_out$p.val, 3), "\n")  
+
+beep(5)
+
+```
+
+
+```{r}
+# ❶ MSPE test: pre-MSPE > 5× 인 플라시보 제외 후 p-값 계산
+test_out <- mspe.test(placebos,
+                      discard.extreme = TRUE,   # ← 필터 켜기
+                      mspe.limit      = 5)      # ← 5 배 기준
+cat("▶ filtered p-value =", round(test_out$p.val, 3), "\n")
+
+# ❷ MSPE ratio 플롯(점/히스토그램)도 동일 옵션
+mspe.plot(placebos,
+          discard.extreme = TRUE,
+          mspe.limit      = 5)
+
+# ❸ gap 궤적 플롯(plot_placebos) 역시 동일 인자 사용 가능
+plot_placebos(placebos,
+              discard.extreme = TRUE,
+              mspe.limit      = 5)
+```
+
+####단측검정
+
+
+
+
+```{r}
+library(dplyr)
+
+## 1️⃣ 메타 정보
+meta_df <- placebos$names.and.numbers        # unit.numbers, unit.names
+
+## 2️⃣ pre-MSPE 벡터 만들기  (이름 = unit.numbers, 값 = pre-MSPE)
+mspe_vec <- setNames(
+  placebos$mspe.placs[[1]],                  # data-frame → 벡터
+  meta_df$unit.numbers                       # 동일한 행순서 활용
+)
+
+## 3️⃣ 처리 도로 pre-MSPE
+mspe_treat <- as.numeric(placebos$loss.v)     # scalar
+
+## 4️⃣ 5 배 컷오프 초과 플라시보 ID
+bad_ids <- names(mspe_vec)[ mspe_vec > 5 * mspe_treat ] |>
+           as.numeric()                      # 숫자형으로
+
+## 5️⃣ 제외된 유닛(도로) 목록
+excluded_units <- meta_df %>%
+  filter(unit.numbers %in% bad_ids) %>% print() %>% pull(unit.numbers)
+
+print(excluded_units)
+```
+
+
+```{r}
+# 3) ID 벡터 뽑기 ------------------------------
+treated_id  <- placebos$tr                    # 실제 treated 번호
+control_ids <- c(placebos[["names.and.numbers"]][["unit.numbers"]])
+
+## 0) convenience variables ---------------------------------
+treated_id  <- placebos$tr
+t1_row      <- placebos$t1          # first post-period row index
+
+## 1) reshape ------------------------------------------------
+
+# (2) wide → long 변환 -------------------------------------------
+placebos_long <- placebos$df 
+
+plb_long<- placebos_long %>%                 # 91 × 95 (예시)
+  rename(week_index = "year") %>%
+  mutate(week_index = as.integer(week_index)) %>% 
+  pivot_longer(                             # unit별로 세로로 녹이기
+    -week_index,
+    names_to  = "unit_id",
+    values_to = "value"
+  ) %>% 
+  mutate(
+    unit_id = as.character(unit_id),          # 문자 → 정수
+    post    = week_index >= t1_row          # 사후 구간 플래그
+  )
+
+```
+
+
+```{r}
+library(stringr)
+
+gap_long <- plb_long %>% 
+  mutate(
+    type    = if_else(str_starts(unit_id, "synthetic\\."), "synthetic", "obs"),
+    unit_id = str_remove(unit_id, "^synthetic\\.")   # 숫자만 남김
+  ) %>% 
+  pivot_wider(names_from = type, values_from = value) %>% 
+  mutate(
+    gap = obs - synthetic      # (음수 → 교통량 감소)
+  ) %>%
+  filter(!unit_id %in% excluded_units)
+```
+
+
+```{r}
+treated_id <- "Y1"                 # 또는 41 등
+control_ids <- gap_long %>% 
+  filter(!str_detect(unit_id, "[^0-9]")) %>%   # 숫자만
+  distinct(unit_id) %>% 
+  pull(unit_id) %>% 
+  setdiff(treated_id)
+
+# ① treated 단측 통계량 (감소면 음수)
+stat_treat <- gap_long %>% 
+  filter(unit_id == treated_id, post) %>% 
+  summarise(stat = sum(gap, na.rm = TRUE)) %>% 
+  pull(stat)
+
+# ② 컨트롤(placebo) 통계량
+placebo_stats <- gap_long %>% 
+  filter(unit_id %in% control_ids, post) %>% 
+  group_by(unit_id) %>% 
+  summarise(stat = sum(gap, na.rm = TRUE)) %>% 
+  pull(stat)
+
+# ③ ‘감소’ 방향 단측 p-value
+p_one <- (1 + sum(placebo_stats <= stat_treat)) /
+         (1 + length(placebo_stats))
+
+
+p_one
+```
+#===
+#단측검정 히스토그램
+
+```{r}
+# 1) 필요한 패키지 로드
+library(ggplot2)
+
+# 2) 데이터프레임으로 변환
+df_plot_placebos <- data.frame(
+  stat = placebo_stats
+)
+
+# 3) 히스토그램 + 처리구간 통계량 표시
+p_placebos <- ggplot(df_plot_placebos, aes(x = stat)) +
+  geom_histogram(binwidth = diff(range(df_plot_placebos$stat)) / 30,
+                 fill = "grey80", color = "white") +
+  geom_vline(xintercept = stat_treat,
+             color = "red", size = 1) +
+  labs(
+    title = "Placebo P-value Histogram (One tale? negative)",
+    subtitle = paste0("One tale p-value = ",
+                      round(p_one, 3)),
+    x = "Post Gap Sum(statistic)",
+    y = "Placebos"
+  ) +
+  theme_minimal()
+
+# 4) 출력
+print(p_placebos)
+
+```
+
+```{r}
+pl_treat_id <- c("Y1", "synthetic.Y1")
+
+# (1) 부호 유지 통계량 = Σ gap  (감소면 음수)
+t_y1 <- plb_long %>%
+  filter(unit_id == c("Y1"), post) %>%
+  group_by(unit_id) %>%
+  summarise(stat = sum(value, na.rm = TRUE)) %>%
+  pull(stat)
+
+t_s <- plb_long %>%
+  filter(unit_id == c("synthetic.Y1"), post) %>%
+  group_by(unit_id) %>%
+  summarise(stat = sum(value, na.rm = TRUE)) %>%
+  pull(stat)
+
+t_y1 - t_s
+
+```
+```{r}
+# ① treated 단측 통계량 (감소면 음수)
+stat_treat <- plb_long %>% 
+  filter(unit_id == pl_treat_id, post) %>% 
+  summarise(stat = sum(value, na.rm = TRUE)) %>% 
+  pull(stat)
+
+stat_treat
+```
+
+
+```{r}
+# 3️⃣ placebo 갭 플롯 (gap over time)
+plot_placebos(
+  placebos,
+  discard.extreme = TRUE,   # 컷 적용
+  mspe.limit      = 5       # treated MSPE × 5
+)
+
+# 4️⃣ p-value 계산 (MSPE test)
+test_out <- mspe.test(
+  placebos,
+  discard.extreme = TRUE,
+  mspe.limit      = 5
+)
+cat("▶ Final p-value =", round(test_out$p.val, 3), "\n")
+
+# 5️⃣ MSPE ratio 히스토그램
+mspe.plot(
+  placebos,
+  discard.extreme = TRUE,
+  mspe.limit      = 5,
+  plot.hist       = TRUE    # 필요 시 FALSE: dotplot
+  
+)
+
+
+# 5️⃣ MSPE ratio 분포 플롯
+#    - mspe.plot(): post/pre-period MSPE ratio 를 히스토그램으로
+mspe.plot(placebos, discard.extreme = TRUE, mspe.limit = 5)
+```
+
+#------------------------
+#in_time_placebo
+#------------------------
+
+
+
+```{r}
+library(beepr)
+library(Synth)
+
+options(scipen = 999)
+
+donor_ok_ids <- df_scm %>%
+  filter(unit_id >= 174) %>%
+  distinct(unit_id) %>%  # 고유값만
+  pull(unit_id)   
+
+
+n_all <- 90
+n_pre <- 20
+
+donor_ids_final <- donor_ok_ids 
+
+treat_id    <- 41
+
+
+# 3️⃣ final dataprep 파라미터
+dp_in_time <- list(
+  foo               = as.data.frame(df_scm),
+  predictors              = good_preds_new, 
+  predictors.op           = "mean",
+  special.predictors      = sp_2_in_time, #, #sp_all_1wk, # sp_2_all, sp_all_in_time
+  dependent               = "traffic",
+  unit.variable           = "unit_id",
+  unit.names.variable     = "unit_name",
+  time.variable           = "week_index",
+  treatment.identifier    = treat_id,
+  controls.identifier     = donor_ids_final,
+  time.predictors.prior   = 1:20,
+  time.optimize.ssr       = 1:20,
+  time.plot               = 1:90
+)
+
+# 4️⃣ final dataprep & synth
+dp_in_time <- do.call(dataprep, dp_in_time)
+so_in_time <- synth(dp_in_time)
+
+
+# 5️⃣ gap 계산
+gaps_in_time <- dp_in_time$Y1plot - (dp_in_time$Y0plot %*% so_in_time$solution.w)
+
+# 6️⃣ 시간 변수
+week_finalin_time      <- dp_in_time$tag$time.plot
+lab_major_finalin_time <- c(1, seq(5, max(week_finalin_time), by = 5))
+
+# 7️⃣ 궤적(Path) 플롯
+path.plot(
+  synth.res    = so_in_time,
+  dataprep.res = dp_in_time,
+  Ylab = "Weekly traffic",
+  Xlab = "Week",
+  Legend = c("Treated","Synthetic"),
+  Legend.position = "bottomright"
+)
+abline(v = week_finalin_time, col = "grey90", lty = "dotted")
+abline(v = n_pre + 1, lty = 2)
+text(n_pre + 1, par("usr")[3] + diff(par("usr")[3:4])*0.05,
+     labels = "Final CCC launch", cex=0.75, adj=c(0.5,1), xpd=TRUE)
+axis(1, at = lab_major_finalin_time, labels = lab_major_finalin_time, las=1, cex.axis=0.8)
+
+# 8️⃣ gap 플롯
+gaps.plot(
+  synth.res    = so_in_time,
+  dataprep.res = dp_in_time,
+  Ylab = "Gap",
+  Xlab = "Week"
+)
+abline(v = week_finalin_time, col = "grey90", lty = "dotted")
+abline(v = n_pre + 1, lty = 2)
+
+
+# 깨끗한 버전
+path.plot(synth.res   = so_in_time,
+          dataprep.res= dp_in_time,
+          Ylab = "Weekly traffic", Xlab = "Week",
+          Legend = c("Treated","Synthetic"),
+          Legend.position = "bottomright")
+abline(v = n_pre + 1, lty = 2)               # 정책선
+
+gaps.plot(synth.res   = so_refined,
+          dataprep.res= dp_refined,
+          Ylab = "Gap", Xlab = "Week")
+abline(v = n_pre + 1, lty = 2)
+
+
+# 9️⃣ 사전·사후 RMSPE & Ratio
+pre_rmspe_in_time  <- sqrt(mean(gaps_in_time[1:n_pre]^2))
+post_rmspe_in_time <- sqrt(mean(gaps_in_time[(n_pre+1):n_all]^2))
+ratio_in_time     <- post_rmspe_in_time / pre_rmspe_in_time
+
+att_pct1in_time <- mean(gaps_in_time[(n_pre+1):n_all])      # %-point ATT
+
+baseline_prein_time <- df_scm %>%
+  filter(
+    unit_id    == treat_id,   # 처리 대상 도로 ID
+    week_index <= n_pre             # 개입 이전 주(week)만
+  ) %>%
+  summarise(pre_mean = mean(traffic, na.rm = TRUE)) %>%
+  pull(pre_mean)
+
+eff_final1in_time <- (att_pct1in_time/baseline_prein_time)*100
+
+cat(sprintf(
+  "\n▶ Final RMSPE | Pre = %.3f   Post = %.3f   Ratio = %.3f | ATT = %.3f |ATT ratio =%.3f ",
+  pre_rmspe_in_time, post_rmspe_in_time, ratio_in_time, att_pct1in_time, eff_final1in_time
+))
+
+goal_v1in_time <- baseline_prein_time*0.19775
+
+cat(sprintf(
+  "\n▶ Traffic before treat = %.3f   Expected traffic = %.3f  diff = %.3f",
+  baseline_prein_time,  goal_v1in_time, abs(goal_v1in_time-att_pct1in_time)
+))
+
+
+# 11️⃣ final 가중치 테이블
+stab_in_time <- synth.tab(dataprep.res = dp_in_time,
+                        synth.res   = so_in_time,
+                        round.digit = 10)
+weights_final_tbl_in_time <- stab_in_time$tab.w %>%
+  arrange(desc(w.weights))
+print(weights_final_tbl_in_time, row.names = FALSE)
+
+
+
+
+beep(5)  # 완료 알림
+```
+
+# ─── Leave-One-Out Sensitivity ───
+
+```{r}
+
+
+# ─── Leave-One-Out with Error 무시 ───
+
+# 결과를 저장할 벡터 초기화
+loo_att <- numeric(length(donor_ids_final))
+names(loo_att) <- donor_ids_final
+
+# 예: 사전 기간 길이
+
+n_pre <- 51
+
+for (i in seq_along(donor_ids_final)) {
+  excluded <- donor_ids_final[i]
+  donors_loo <- setdiff(donor_ids_final, excluded)
+  
+  # dataprep & synth 실행 시 오류 무시
+  res <- tryCatch({
+    # dataprep 파라미터에서 controls만 교체
+    dp_loo <- do.call(dataprep, modifyList(
+      dp_params_final,
+      list(controls.identifier = donors_loo)
+    ))
+    so_loo <- synth(dp_loo)
+    
+    # gap 계산 및 ATT 산출
+    gaps_loo <- dp_loo$Y1plot - (dp_loo$Y0plot %*% so_loo$solution.w)
+    mean(gaps_loo[(n_pre+1):length(gaps_loo)], na.rm = TRUE)
+    
+  }, error = function(e) {
+    # 오류 발생 시 NA 반환
+    message(sprintf("Skipped donor %s due to error: %s", excluded, e$message))
+    NA
+  })
+  
+  loo_att[i] <- res
+}
+
+# 결과 확인
+print(round(loo_att, 3))
+
+# 시각화 (barplot 예시)
+barplot(loo_att,
+        las = 2,
+        main = "Leave-One-Out ATT (with error skip)",
+        ylab = "ATT (Post-treatment avg gap)",
+        cex.names = 0.8)
+abline(h = loo_att[as.character(treat_id)], col = "red", lty = 2)
+```
+
+
+
+
+```{r}
+# ───────────────────────────────────────────────────────────
+# final p-value 계산 및 분포 플롯
+# ───────────────────────────────────────────────────────────
+library(dplyr)
+library(tibble)
+library(ggplot2)
+
+# 1️⃣ Treated의 Post/Pre RMSPE 비율
+pre_treated_final  <- sqrt(mean(gaps_final[1:n_pre]^2, na.rm = TRUE))
+post_treated_final <- sqrt(mean(gaps_final[(n_pre+1):n_all]^2, na.rm = TRUE))
+ratio_treated_final <- post_treated_final / pre_treated_final
+
+# 2️⃣ Placebo들의 Post/Pre RMSPE 비율
+pre_placebo_final  <- sqrt(colMeans(store_final_pb[1:n_pre, , drop=FALSE]^2, na.rm = TRUE))
+post_placebo_final <- sqrt(colMeans(store_final_pb[(n_pre+1):n_all, , drop=FALSE]^2, na.rm = TRUE))
+ratio_placebo_final <- post_placebo_final / pre_placebo_final
+
+# 3️⃣ p-value 계산 (placebo 중 처리군 이상 비율)
+p_value_final <- mean(ratio_placebo_final >= ratio_treated_final, na.rm = TRUE)
+cat(sprintf("▶ Final p-value = %.3f\n", p_value_final))
+
+# 4️⃣ 분포 히스토그램 + 처리군 비율 표시
+df_ratio_final <- tibble(Ratio = ratio_placebo_final)
+
+ggplot(df_ratio_final, aes(x = Ratio)) +
+  geom_histogram(binwidth = 0.2, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = ratio_treated_final,
+             color = "red", linetype = "dashed", size = 1) +
+  annotate("text",
+           x = ratio_treated_final,
+           y = Inf,
+           label = paste0("Treated\nRatio=", round(ratio_treated_final, 2)),
+           vjust = -0.5, hjust = 1.1,
+           color = "red", size = 3) +
+  labs(
+    title    = "Placebo Post/Pre RMSPE Ratio Distribution",
+    subtitle = paste("Final p-value =", round(p_value_final, 3)),
+    x        = "Post/Pre RMSPE Ratio",
+    y        = "Count"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 1) 플라시보 비율 데이터프레임 생성
+# ratio_placebo_final: named numeric 벡터 (names = unit_id)
+df_placebo <- tibble(
+  unit_id = as.integer(names(ratio_placebo_final)),
+  Ratio   = as.numeric(ratio_placebo_final)
+) %>%
+  left_join(
+    df_scm %>% distinct(unit_id, unit_name),
+    by = "unit_id"
+  ) %>%
+  mutate(
+    Label = paste0(unit_name, "-", unit_id),
+    Type  = "Placebo"
+  )
+
+# 2) 처리군 비율 행 추가
+df_treated <- tibble(
+  unit_id = treat_id_final,
+  Ratio   = ratio_treated_final,
+  unit_name = df_scm %>% filter(unit_id == treat_id_final) %>% pull(unit_name),
+  Label   = paste0(unit_name, "-", unit_id),
+  Type    = "Treated"
+)
+
+df_dot <- bind_rows(df_placebo, df_treated) %>%
+  arrange(Ratio) %>%
+  mutate(
+    Label = paste0(unit_name, "-", unit_id),
+    Type  = if_else(Type == "Treated", "Treated", "Placebo"),
+    Label = factor(Label, levels = unique(Label)),   # 중복 레벨 제거
+    Shape = if_else(Type == "Treated", 15, 17)
+  )
+
+ggplot(df_dot, aes(x = Ratio, y = Label)) +
+  geom_point(aes(shape = Type), size = 3) +
+  scale_shape_manual(values = c(Placebo = 17, Treated = 15), guide = FALSE) +
+  labs(
+    title    = paste0("Post/Pre RMSPE Ratio (Final SCM) — p=", round(p_value_final,3)),
+    x        = "Post/Pre RMSPE Ratio",
+    y        = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 6),
+    plot.title  = element_text(size = 12, face = "bold", hjust = 0.5)
+  )
+```
+
+#### 양측검정
+##mscmt?
+
+```{r}
+library(MSCMT)
+library(dplyr)
+
+# 1. week를 Date로
+df_mscmt <- df_scm %>% mutate(week = as.Date(week))
+
+# 2. listFromLong — traffic만 남기기
+msc_list <- listFromLong(
+  foo             = as.data.frame(df_mscmt),
+  unit.variable   = "unit_id",
+  time.variable   = "week",
+  exclude.columns = c(
+    "routeNM", "linkID", "road",
+    "unit_name", "region", "week_index",
+    "speed"           # speed 제거
+  )
+)
+
+# 3. treated / control
+treated_unit <- "41"                       # ← 한 개만
+exclude_ids  <- as.character(1:174)
+all_units    <- colnames(msc_list[[1]])
+control_ids  <- setdiff(all_units, c(treated_unit, exclude_ids))
+
+# 4. Pre-treatment (2×1)
+times.dep <- matrix(
+  c("2023-02-06", "2024-01-22"),
+  nrow     = 2,
+  dimnames = list(c("start","end"), "traffic")
+)
+
+# 5. Post-treatment (2×1)
+times.pred <- matrix(
+  c("2024-01-29", "2024-10-28"),
+  nrow     = 2,
+  dimnames = list(c("start","end"), "traffic")
+)
+
+# 6. 합성통제모형 실행
+msc <- mscmt(
+  data                 = msc_list,
+  treatment.identifier = treated_unit,
+  controls.identifier  = control_ids,
+  times.dep            = times.dep,
+  times.pred           = times.pred,
+  placebo              = TRUE
+)
+
+# 7. traffic에 대한 단측(감소) p-value
+p_traffic <- pvalue(
+  msc,
+  what        = "traffic",
+  alternative = "less"
+)
+
+print(p_traffic)
+
+```
+
+
+
+```{r}
+
+# 3) 합성통제모형 실행 (traffic만)
+msc <- mscmt(
+  data                 = msc_list,
+  treatment.identifier = 41,
+  controls.identifier  = control_ids,
+  times.dep            = times.dep,
+  times.pred           = times.pred,
+  placebo              = TRUE
+)
+
+# 4) traffic에 대한 단측(감소) p-value 계산
+p_traffic <- pvalue(
+  msc,
+  what        = "traffic",
+  alternative = "less"
+)
+
+print(p_traffic)
+```
+
+
+```{r}
+# 1) 숫자형 보증 + 날짜/문자 열 제거
+df_mscmt <- df_scm %>%    # 위 mutate 코드
+msc_list <- listFromLong(
+  foo             = df_mscmt,
+  unit.variable   = "unit_id",
+  time.variable   = "week_index",
+  exclude.columns = c("routeNM","linkID","road","unit_name","region","week")
+)
+
+# 2) treated / control
+treated_ids <- as.character(c(41, 42))
+exclude_ids <- as.character(1:174)
+all_units   <- colnames(msc_list[[1]])
+control_ids <- setdiff(all_units, c(treated_ids, exclude_ids))
+
+# 3) times.dep  (start/end 주 번호는 **숫자**)
+times.dep <- matrix(c(1, 91), nrow = 2,
+                    dimnames = list(c("start","end"), "traffic"))
+
+# 4) times.pred  (주 1~51 traffic + speed 두 구간)
+traffic_mat <- matrix(rep(1:51, each = 2), nrow = 2)
+colnames(traffic_mat) <- rep("traffic", 51)
+
+speed_mat   <- matrix(c(1,25, 26,51), nrow = 2)
+colnames(speed_mat)   <- rep("speed", 2)
+
+times.pred  <- cbind(traffic_mat, speed_mat)
+rownames(times.pred) <- c("start","end")
+
+# 5) mscmt
+msc <- mscmt(
+  data                 = msc_list,
+  treatment.identifier = treated_ids,
+  controls.identifier  = control_ids,
+  times.dep            = times.dep,
+  times.pred           = times.pred,
+  placebo              = TRUE
+)
+
+# 6) 단측(감소) p-값
+p_one   <- pvalue(msc, type = "one.sided", alternative = "lower")
+p_joint <- pvalue(msc, type = "joint",    alternative = "lower")
+
+p_one
+p_joint
+```
+
+
+
+
+
+
+
+#========================
+#Time Extention
+
+```{r}
+library(beepr)
+library(Synth)
+
+options(scipen = 999)
+
+donor_ok_ids <- df_scm %>%
+  filter(unit_id >= 174) %>%
+  distinct(unit_id) %>%  # 고유값만
+  pull(unit_id)   
+
+
+n_all <- 112
+n_pre <- 52
+
+donor_ids_final <- donor_ok_ids 
+
+treat_id    <- 41
+predictors_final  <- c("lanes.min","local_length_km","total_length_km",
+                       "speed.max","lanes.max","speed.min","local_share")
+
+good_preds_o <- c("lanes.min","local_length_km","total_length_km", "speed.max", "lanes.max", "speed.min", "local_share")
+
+good_preds_new <- c("lanes.max", "speed.max","local_share", "total_length_km")
+
+
+# 2️⃣ jitter 추가 (optional)
+
+
+# 3️⃣ final dataprep 파라미터
+dp_extention <- list(
+  foo               = as.data.frame(df_scm),
+  predictors              = good_preds_new, 
+  predictors.op           = "mean",
+  special.predictors      = sp_2_all, #, #sp_all_1wk, # sp_2_all,
+  dependent               = "traffic",
+  unit.variable           = "unit_id",
+  unit.names.variable     = "unit_name",
+  time.variable           = "week_index",
+  treatment.identifier    = treat_id,
+  controls.identifier     = donor_ids_final,
+  time.predictors.prior   = 1:n_pre,
+  time.optimize.ssr       = 1:n_pre,
+  time.plot               = 1:112
+)
+
+# 4️⃣ final dataprep & synth
+dp_extention<- do.call(dataprep, dp_extention)
+so_extention  <- synth(dp_extention)
+
+
+# 5️⃣ gap 계산
+gaps_extention  <- dp_extention $Y1plot - (dp_extention $Y0plot %*% so_extention $solution.w)
+
+# 6️⃣ 시간 변수
+week_extention       <- dp_extention $tag$time.plot
+lab_major_extention  <- c(1, seq(5, max(week_extention ), by = 5))
+
+# 7️⃣ 궤적(Path) 플롯
+path.plot(
+  synth.res    = so_extention ,
+  dataprep.res = dp_extention ,
+  Ylab = "Weekly traffic",
+  Xlab = "Week",
+  Legend = c("Treated","Synthetic"),
+  Legend.position = "bottomright"
+)
+abline(v = week_extention , col = "grey90", lty = "dotted")
+abline(v = n_pre + 1, lty = 2)
+text(n_pre + 1, par("usr")[3] + diff(par("usr")[3:4])*0.05,
+     labels = "extention  CCC launch", cex=0.75, adj=c(0.5,1), xpd=TRUE)
+axis(1, at = lab_major_extention , labels = lab_major_extention , las=1, cex.axis=0.8)
+
+# 8️⃣ gap 플롯
+gaps.plot(
+  synth.res    = so_extention ,
+  dataprep.res = dp_extention ,
+  Ylab = "Gap",
+  Xlab = "Week"
+)
+abline(v = week_extention , col = "grey90", lty = "dotted")
+abline(v = n_pre + 1, lty = 2)
+
+# 9️⃣ 사전·사후 RMSPE & Ratio
+pre_rmspe_extention   <- sqrt(mean(gaps_extention [1:n_pre]^2))
+post_rmspe_extention  <- sqrt(mean(gaps_extention [(n_pre+1):n_all]^2))
+ratio_extention       <- post_rmspe_extention  / pre_rmspe_extention 
+
+att_pct1_extention <- mean(gaps_extention [(n_pre+1):n_all])      # %-point ATT
+
+baseline_extention <- df_scm %>%
+  filter(
+    unit_id    == treat_id,   # 처리 대상 도로 ID
+    week_index <= n_pre             # 개입 이전 주(week)만
+  ) %>%
+  summarise(pre_extention = mean(traffic, na.rm = TRUE)) %>%
+  pull(pre_extention)
+
+eff_extention1 <- (att_pct1_extention / baseline_extention) * 100
+
+# 출력할 때도 같은 이름 사용
+cat(sprintf(
+  "\n▶ extention  RMSPE | Pre = %.3f   Post = %.3f   Ratio = %.3f | ATT = %.3f | ATT ratio = %.3f ",
+  pre_rmspe_extention,
+  post_rmspe_extention,
+  ratio_extention,
+  att_pct1_extention,
+  eff_extention1    # ← 여기
+))
+
+goal_v1_extention <- baseline_extention*0.19775
+
+cat(sprintf(
+  "\n▶ Traffic before treat = %.3f   Expected traffic = %.3f  diff = %.3f",
+  baseline_extention,  goal_v1_extention, abs(goal_v1_extention-att_pct1_extention)
+))
+
+
+# 11️⃣  가중치 테이블
+stab_extention <- synth.tab(
+  dataprep.res = dp_extention,
+  synth.res    = so_extention,    # ← 여기
+  round.digit  = 10
+)
+weights_extention_tbl <- stab_extention$tab.w %>%
+  arrange(desc(w.weights))
+print(weights_extention_tbl, row.names = FALSE)
+
+
+
+
+beep(5)  # 완료 알림
+```
+
+
+
+```{r}
+# 1️⃣ SCtools 로드
+library(SCtools)
+# dp_final, so_final 은 앞서 만든 최종 dataprep & synth 결과입니다.
+
+# 2️⃣ placebo 합성대조군 생성
+#    - Sigf.ipop: ipop 최적화 정밀도 (기본 5)
+#    - strategy: "sequential" 또는 병렬 "multiprocess"
+placebos_extention <- generate.placebos(
+  dataprep.out = dp_extention,
+  synth.out    = so_extention,
+  Sigf.ipop    = 5,
+  strategy     = "sequential"
+)  
+# → 반환값(placebos)은 tdf 객체로, 원본 처리군과 각 placebo의 Y & Y_synth 시계열, 
+#    사전 MSPE(mspe.placs) 등을 담고 있습니다  
+
+# 3️⃣ placebo 분포 플롯
+#    - plot_placebos(): 모든 placebo gap + 처리군 gap을 일괄 시각화
+plot_placebos(placebos_extention)  
+
+# 4️⃣ MSPE test (p-value 계산)
+test_out <- mspe.test(placebos_extention)
+cat("▶ Final p-value =", round(test_out$p.val, 3), "\n")  
+
+beep(5)
+
+```
+
+
+```{r}
+# ❶ MSPE test: pre-MSPE > 5× 인 플라시보 제외 후 p-값 계산
+test_out_extention <- mspe.test(placebos_extention,
+                      discard.extreme = TRUE,   # ← 필터 켜기
+                      mspe.limit      = 5)      # ← 5 배 기준
+cat("▶ filtered p-value =", round(test_out_extention$p.val, 3), "\n")
+
+# ❷ MSPE ratio 플롯(점/히스토그램)도 동일 옵션
+mspe.plot(placebos_extention,
+          discard.extreme = TRUE,
+          mspe.limit      = 5)
+
+# ❸ gap 궤적 플롯(plot_placebos) 역시 동일 인자 사용 가능
+plot_placebos(placebos_extention,
+              discard.extreme = TRUE,
+              mspe.limit      = 5)
+```
+
+####extention 단측검정
+
+
+
+
+```{r}
+library(dplyr)
+
+## 1️⃣ 메타 정보
+meta_df_extention <- placebos_extention$names.and.numbers        # unit.numbers, unit.names
+
+## 2️⃣ pre-MSPE 벡터 만들기  (이름 = unit.numbers, 값 = pre-MSPE)
+mspe_vec_extention <- setNames(
+  placebos_extention$mspe.placs[[1]],                  # data-frame → 벡터
+  meta_df_extention$unit.numbers                       # 동일한 행순서 활용
+)
+
+## 3️⃣ 처리 도로 pre-MSPE
+mspe_treat_extention <- as.numeric(placebos_extention$loss.v)     # scalar
+
+## 4️⃣ 5 배 컷오프 초과 플라시보 ID
+bad_ids_extention <- names(mspe_vec_extention)[ mspe_vec_extention > 5 * mspe_treat_extention ] |>
+           as.numeric()                      # 숫자형으로
+
+## 5️⃣ 제외된 유닛(도로) 목록
+excluded_units_extention <- meta_df_extention %>%
+  filter(unit.numbers %in% bad_ids_extention) %>% print() %>% pull(unit.numbers)
+
+print(excluded_units_extention)
+```
+
+
+```{r}
+# 3) ID 벡터 뽑기 ------------------------------
+treated_id_extention  <- placebos_extention$tr                    # 실제 treated 번호
+control_ids_extention <- c(placebos_extention[["names.and.numbers"]][["unit.numbers"]])
+
+## 0) convenience variables ---------------------------------
+treated_id_extention  <- placebos_extention$tr
+t1_row_extention      <- placebos_extention$t1          # first post-period row index
+
+## 1) reshape ------------------------------------------------
+
+# (2) wide → long 변환 -------------------------------------------
+placebos_long_extention <- placebos_extention$df 
+
+plb_long_extention<- placebos_long_extention %>%                 # 91 × 95 (예시)
+  rename(week_index = "year") %>%
+  mutate(week_index = as.integer(week_index)) %>% 
+  pivot_longer(                             # unit별로 세로로 녹이기
+    -week_index,
+    names_to  = "unit_id",
+    values_to = "value"
+  ) %>% 
+  mutate(
+    unit_id = as.character(unit_id),          # 문자 → 정수
+    post    = week_index >= t1_row          # 사후 구간 플래그
+  )
+
+```
+```{r}
+gap_long_extention <- plb_long_extention %>% 
+  mutate(
+    type    = if_else(str_starts(unit_id, "synthetic\\."), "synthetic", "obs"),
+    unit_id = str_remove(unit_id, "^synthetic\\.")   # 숫자만 남김
+  ) %>% 
+  pivot_wider(names_from = type, values_from = value) %>% 
+  mutate(
+    gap = obs - synthetic      # (음수 → 교통량 감소)
+  ) %>%
+  filter(!unit_id %in% excluded_units)
+```
+
+
+```{r}
+treated_id <- "Y1"                 # 또는 41 등
+control_ids_extention <- gap_long_extention %>% 
+  filter(!str_detect(unit_id, "[^0-9]")) %>%   # 숫자만
+  distinct(unit_id) %>% 
+  pull(unit_id) %>% 
+  setdiff(treated_id)
+
+# ① treated 단측 통계량 (감소면 음수)
+stat_treat_extention <- gap_long_extention %>% 
+  filter(unit_id == treated_id, post) %>% 
+  summarise(stat = sum(gap, na.rm = TRUE)) %>% 
+  pull(stat)
+
+# ② 컨트롤(placebo) 통계량
+placebo_stats_extention <- gap_long_extention %>% 
+  filter(unit_id %in% control_ids, post) %>% 
+  group_by(unit_id) %>% 
+  summarise(stat = sum(gap, na.rm = TRUE)) %>% 
+  pull(stat)
+
+# ③ ‘감소’ 방향 단측 p-value
+p_one_extention <- (1 + sum(placebo_stats_extention <= stat_treat_extention)) /
+         (1 + length(placebo_stats_extention))
+
+
+p_one_extention
+```
+
+
+
+```{r}
+# 1) 필요한 패키지 로드
+library(ggplot2)
+
+# 2) 데이터프레임으로 변환
+df_plot <- data.frame(
+  stat = placebo_stats_extention
+)
+
+# 3) 히스토그램 + 처리구간 통계량 표시
+p <- ggplot(df_plot, aes(x = stat)) +
+  geom_histogram(binwidth = diff(range(df_plot$stat)) / 30,
+                 fill = "grey80", color = "white") +
+  geom_vline(xintercept = stat_treat_extention,
+             color = "red", size = 1) +
+  labs(
+    title = "Placebo 통계량 분포 (단측 검정 – 감소 방향)",
+    subtitle = paste0("단측 p-value = ",
+                      round(p_one_extention, 3)),
+    x = "사후 gap 합계(statistic)",
+    y = "플라시보 개수"
+  ) +
+  theme_minimal()
+
+# 4) 출력
+print(p)
+```
+
+
+
+#=======================
+
+```{r}
+pl_treat_id <- c("Y1", "synthetic.Y1")
+
+# (1) 부호 유지 통계량 = Σ gap  (감소면 음수)
+t_y1 <- plb_long %>%
+  filter(unit_id == c("Y1"), post) %>%
+  group_by(unit_id) %>%
+  summarise(stat = sum(value, na.rm = TRUE)) %>%
+  pull(stat)
+
+t_s <- plb_long %>%
+  filter(unit_id == c("synthetic.Y1"), post) %>%
+  group_by(unit_id) %>%
+  summarise(stat = sum(value, na.rm = TRUE)) %>%
+  pull(stat)
+
+t_y1 - t_s
+
+```
+```{r}
+# ① treated 단측 통계량 (감소면 음수)
+stat_treat <- plb_long %>% 
+  filter(unit_id == pl_treat_id, post) %>% 
+  summarise(stat = sum(value, na.rm = TRUE)) %>% 
+  pull(stat)
+
+stat_treat
+```
+
+
+```{r}
+# 3️⃣ placebo 갭 플롯 (gap over time)
+plot_placebos(
+  placebos,
+  discard.extreme = TRUE,   # 컷 적용
+  mspe.limit      = 5       # treated MSPE × 5
+)
+
+# 4️⃣ p-value 계산 (MSPE test)
+test_out <- mspe.test(
+  placebos,
+  discard.extreme = TRUE,
+  mspe.limit      = 5
+)
+cat("▶ Final p-value =", round(test_out$p.val, 3), "\n")
+
+# 5️⃣ MSPE ratio 히스토그램
+mspe.plot(
+  placebos,
+  discard.extreme = TRUE,
+  mspe.limit      = 5,
+  plot.hist       = TRUE    # 필요 시 FALSE: dotplot
+  
+)
+
+
+# 5️⃣ MSPE ratio 분포 플롯
+#    - mspe.plot(): post/pre-period MSPE ratio 를 히스토그램으로
+mspe.plot(placebos, discard.extreme = TRUE, mspe.limit = 5)
+```
