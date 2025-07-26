@@ -9,14 +9,8 @@ output:
 
 ### 1. Import
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(
-  cache    = TRUE,    # 캐시 기본 ON
-  autodep  = TRUE,    # 청크 간 의존성 자동 추적
-  echo     = TRUE,    # 코드 보이기
-  message  = FALSE,   # 메시지 숨기기
-  warning  = FALSE    # 경고 숨기기
-)
+```{r}
+
 #incheon_daily_full
 library(dplyr)
 library(tidyr)
